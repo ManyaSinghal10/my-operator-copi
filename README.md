@@ -24,7 +24,7 @@ This repo was built with the assistance of [Google Antigravity](https://antigrav
 - **Audio Output**: Speaker or headphone output device
 - **Display**: Display monitor or touchscreen (e.g., 480x320 kiosk display)
 
-<img width="3024" height="1672" src="https://github.com/user-attachments/assets/438f4e43-c0e4-4de1-9ee1-fac76267dbc3" />
+<img width="3024" height="1672" src="https://storage.googleapis.com/experiments-uploads/gemma-translator/gemma-translator-cad.gif" />
 
 ## Setup Instructions
 
