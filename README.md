@@ -2,7 +2,7 @@
 
 This repo was built with the assistance of [Google Antigravity](https://antigravity.google/) and includes code to run an on-device, fully offline voice translator powered by Gemma 4 and LiteRT-LM. This project features a web frontend optimized for small handheld displays (e.g., 480x320) and a Python API server (`http.server`) that communicates with Gemma. Text-to-speech is powered by [Moonshine](https://github.com/moonshine-ai/moonshine).
 
-<img width="960" height="540" src="https://github.com/user-attachments/assets/fcbdbbd0-1269-44e0-aa3d-61d7a9699b4f" />
+<img width="960" height="540" src="https://storage.googleapis.com/experiments-uploads/gemma-translator/gemma-translator.gif" />
 
 ## Features
 
@@ -135,7 +135,8 @@ Open **Settings (⚙)** → **Keyboard Mode** → choose **Landscape** or **Vert
 | `landscape` | Active-person scheme (Space / Z / ← →) — default |
 | `vertical` | Two-hand scheme (Z / X / ← → / − +) |
 
-### Authors
+### Credits
+Made by a small team at [Google Creative Lab](https://github.com/googlecreativelab):
 - [Alan Yam](https://github.com/alanvww)
 - [Shashwath Santosh](https://x.com/shashwth)
 - [Dan Motzenbecker](https://github.com/dmotz)
