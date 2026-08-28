@@ -16,15 +16,14 @@
 
 import React from "react"
 
-// Fullscreen developer settings: theme color, LLM endpoint/model/key,
-// keyboard mode, TTS toggle, visualizer density, and system volume
+// Fullscreen developer settings: theme color, keyboard mode, TTS toggle,
+// Gemma enhancement toggle, visualizer density, and system volume
 // (proxied to amixer on the Pi via the backend's /api/volume).
 export default function SettingsOverlay({
   isActive,
   onClose,
   config,
   setConfig,
-  onTestConnection,
 }) {
   const THEME_COLORS = [
     { name: "RED", value: "#ff4444" },
@@ -131,44 +130,6 @@ export default function SettingsOverlay({
         </div>
 
         <div className="form-group">
-          <label>API Endpoint</label>
-          <div className="input-inline">
-            <input
-              type="text"
-              value={config.endpointUrl}
-              onChange={(e) => handleChange("endpointUrl", e.target.value)}
-            />
-            <button className="overlay-btn btn-sm" onClick={onTestConnection}>
-              Test
-            </button>
-          </div>
-        </div>
-
-        <div className="form-group">
-          <label>Model Name</label>
-          <input
-            type="text"
-            value={config.modelName}
-            onChange={(e) => handleChange("modelName", e.target.value)}
-            list="model-suggestions"
-          />
-          <datalist id="model-suggestions">
-            <option value="gemma4-e2b"></option>
-            <option value="gemma-4-2b"></option>
-          </datalist>
-        </div>
-
-        <div className="form-group">
-          <label>API Key</label>
-          <input
-            type="password"
-            placeholder="Optional api key"
-            value={config.apiKey}
-            onChange={(e) => handleChange("apiKey", e.target.value)}
-          />
-        </div>
-
-        <div className="form-group">
           <label>Keyboard Mode</label>
           <select
             value={config.keyboardMode}
@@ -191,6 +152,15 @@ export default function SettingsOverlay({
               onChange={(e) => handleChange("enableTts", e.target.checked)}
             />
             <span className="checkbox-label">Enable Speech Output</span>
+          </label>
+
+          <label className="checkbox-container">
+            <input
+              type="checkbox"
+              checked={config.enhanceWithGemma}
+              onChange={(e) => handleChange("enhanceWithGemma", e.target.checked)}
+            />
+            <span className="checkbox-label">Enhance with Gemma (secondary)</span>
           </label>
         </div>
 

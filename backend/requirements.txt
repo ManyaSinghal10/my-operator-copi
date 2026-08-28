@@ -19,7 +19,6 @@ litert-lm-api==0.13.1
 litert-lm-builder==0.13.0
 markdown-it-py==4.2.0
 mdurl==0.1.2
-moonshine-voice==0.0.65
 numpy==2.5.1
 packaging==26.2
 platformdirs==4.10.0
@@ -39,3 +38,5 @@ typer==0.25.1
 typing_extensions==4.15.0
 urllib3==2.7.0
 wcwidth==0.8.1
+faster-whisper==1.1.1
+gTTS==2.5.4

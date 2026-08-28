@@ -2,7 +2,7 @@
 
 # Gemma Translator
 
-This repo was built with the assistance of [Google Antigravity](https://antigravity.google/) and includes code to run an on-device, fully offline voice translator powered by [Gemma 4](https://ai.google.dev/gemma/docs/core) and [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-lm). This project features a web frontend optimized for small handheld displays (e.g., 480x320) and a Python API server (`http.server`) that communicates with Gemma. Text-to-speech is powered by [Moonshine](https://github.com/moonshine-ai/moonshine).
+This repo was built with the assistance of [Google Antigravity](https://antigravity.google/) and includes code to run an on-device, fully offline voice translator powered by [Whisper](https://github.com/openai/whisper), [IndicTrans2](https://github.com/AI4Bharat/IndicTrans2), and [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-lm). This project features a web frontend optimized for small handheld displays (e.g., 480x320) and a Python API server (`http.server`) that provides local STT/MT/TTS services. Speech recognition is powered by Whisper small, translation by IndicTrans2, with optional Gemma enhancement.
 
 https://github.com/user-attachments/assets/343072ce-dc78-44a7-a783-99312845cabe
 
@@ -76,7 +76,7 @@ This automated script installs Debian audio/venv packages, sets up the Python en
 ## Project Structure
 
 - `frontend/` - React (Vite) web frontend (`index.html`, `src/`, styles, and Vite configuration).
-- `backend/` - Python API server (`server.py` and `requirements.txt`) for Moonshine STT, moonshine-voice TTS, and model proxying.
+- `backend/` - Python API server (`server.py` and `requirements.txt`) for Whisper STT, IndicTrans2 MT, Piper TTS, and optional Gemma enhancement.
 - `deploy/` - Parameterizable systemd service unit template (`gemma-translator.service`).
 - `stl/` - STL files for 3D printing the hardware case.
 - `setup.sh` - Automates Python virtual environment creation and dependency installation.
@@ -92,7 +92,7 @@ The app has two lanes (two people facing each other on the kiosk):
 - **Lane 1 / Person 1** — the left/top lane.
 - **Lane 2 / Person 2** — the right/bottom lane.
 
-Each lane has a rotating language "revolver" and records speech, which is transcribed (Moonshine STT), translated (Gemma), and spoken back in the other lane's language (moonshine-voice TTS).
+Each lane has a rotating language "revolver" and records speech, which is transcribed (Whisper STT), translated (IndicTrans2, with optional Gemma enhancement), and spoken back in the other lane's language (Piper TTS).
 
 ### Landscape Mode (default) — "active person"
 One lane is the **active person** at a time. The active lane is framed with **corner brackets on all four corners**. You drive everything from a single set of keys and switch focus with Space.

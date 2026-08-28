@@ -17,7 +17,6 @@
 import React, { useState, useEffect } from "react"
 import TranslatorApp from "./TranslatorApp"
 import SettingsOverlay from "./components/SettingsOverlay"
-import { testConnectionAPI } from "./utils/api"
 
 // App shell: owns the global config (keyboardMode and themeColor persist in
 // localStorage), the settings overlay, and applies the theme by overriding
@@ -25,34 +24,14 @@ import { testConnectionAPI } from "./utils/api"
 function App() {
   // Global configuration
   const [config, setConfig] = useState({
-    endpointUrl: "http://localhost:9379/v1",
-    modelName: "gemma4-e2b",
-    apiKey: "",
     keyboardMode: localStorage.getItem("keyboardMode") || "landscape",
-    useProxy: true,
     enableTts: true,
+    enhanceWithGemma: false, // Secondary Gemma enhancement (optional)
     visualizerBars: 16,
-    systemPrompt: "Translator mode",
     themeColor: localStorage.getItem("themeColor") || "#ffa500",
   })
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-
-  const testConnection = async () => {
-    try {
-      await testConnectionAPI(
-        config.endpointUrl,
-        config.useProxy,
-        config.apiKey,
-      )
-    } catch (err) {
-      // Ignored: API test failure
-    }
-  }
-
-  useEffect(() => {
-    testConnection()
-  }, [])
 
   useEffect(() => {
     localStorage.setItem("keyboardMode", config.keyboardMode)
@@ -86,7 +65,6 @@ function App() {
         onClose={() => setIsSettingsOpen(false)}
         config={config}
         setConfig={setConfig}
-        onTestConnection={testConnection}
       />
     </div>
   )

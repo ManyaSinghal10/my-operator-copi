@@ -27,8 +27,8 @@ import {
 import { playBlip } from "./utils/audio-blip"
 
 // Core orchestrator for the two-person kiosk translator.
-// Flow: hold a key → record mic (useAudioRecorder) → POST /api/stt (Moonshine)
-// → LLM translation via /proxy (Gemma, strict-JSON prompt) → /api/tts playback.
+// Flow: hold a key → record mic (useAudioRecorder) → POST /api/stt (Whisper)
+// → local /api/translate (IndicTrans2, optional Gemma enhancement) → /api/tts playback.
 
 // Languages offered on each lane's revolver; ttsLang selects the backend voice.
 const AVAILABLE_LANGUAGES = [
@@ -38,6 +38,10 @@ const AVAILABLE_LANGUAGES = [
   { code: "ja", name: "Japanese", voice: "tts", ttsLang: "ja" },
   { code: "zh", name: "Chinese", voice: "tts", ttsLang: "zh" },
   { code: "ko", name: "Korean", voice: "tts", ttsLang: "ko" },
+  { code: "hi", name: "Hindi", voice: "tts", ttsLang: "hi" },
+  { code: "mr", name: "Marathi", voice: "tts", ttsLang: "mr" },
+  { code: "kn", name: "Kannada", voice: "tts", ttsLang: "kn" },
+  { code: "ta", name: "Tamil", voice: "tts", ttsLang: "ta" },
 ]
 
 function TranslatorApp({ config }) {
@@ -220,13 +224,13 @@ function TranslatorApp({ config }) {
 
       // 2. Translation
       const result = await translateText(transcribedText, {
-        ...config,
-        modelName: config.modelName,
-        systemPrompt: `You are a high-performance translator. Your task is to translate text from ${src.name.split(" ")[0]} into ${dst.name.split(" ")[0]}.\nYou MUST format your response as a valid JSON object matching this structure:\n{\n  "translation": "High-quality, natural translation into ${dst.name.split(" ")[0]}"\n}\nDo NOT return anything else except this JSON object. No Markdown block wraps (no \`\`\`json), no introductory text, no conversational text. Start directly with "{" and end directly with "}".`,
+        sourceLang: src.code,
+        targetLang: dst.code,
+        enhanceWithGemma: config.enhanceWithGemma || false,
       })
 
       setTranslationData((prev) => ({ ...prev, text: result.translation }))
-      setMetaText(`Duration: ${result.duration}s | Tokens: ${result.tokens}`)
+      setMetaText(`Duration: ${result.duration}s`)
 
       if (config.enableTts) {
         playTTS(result.translation, dst.ttsLang)

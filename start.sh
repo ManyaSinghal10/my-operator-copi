@@ -32,6 +32,12 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # (block-buffered prints previously hid request logs and hampered debugging)
 export PYTHONUNBUFFERED=1
 
+# Whisper STT configuration (primary STT engine for all languages).
+export WHISPER_MODEL_SIZE="${WHISPER_MODEL_SIZE:-small}"
+export WHISPER_DEVICE="${WHISPER_DEVICE:-cpu}"
+export WHISPER_COMPUTE_TYPE="${WHISPER_COMPUTE_TYPE:-int8}"
+echo "[start.sh] Whisper STT config: model=${WHISPER_MODEL_SIZE} device=${WHISPER_DEVICE} compute_type=${WHISPER_COMPUTE_TYPE}"
+
 # Kill existing processes only if NOT running under systemd
 # (systemd handles process lifecycle; killing ports here causes crash loops)
 if [ -z "$INVOCATION_ID" ]; then

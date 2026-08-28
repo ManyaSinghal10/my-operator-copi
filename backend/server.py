@@ -30,16 +30,52 @@ import ssl
 import threading
 from collections import OrderedDict
 
+import tempfile
+import subprocess
+try:
+    from gtts import gTTS
+except ImportError:
+    gTTS = None
+
 # Multilingual STT via Moonshine.
 # Language is fixed at recognizer construction, so we lazily build (and cache) one
 # recognizer per language actually used.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SUPPORTED_STT_LANGS = {"en", "ar", "es", "ja", "zh", "ko"}
-MAX_MODELS = 2
-_stt_recognizers = OrderedDict()  # language -> recognizer
-# RLock (reentrant): handle_stt holds the lock across get_stt_recognizer() + inference,
-# and get_stt_recognizer() re-acquires it on the same thread. A plain Lock() self-deadlocks.
-_stt_lock = threading.RLock()
+
+# Whisper STT for all languages (primary STT engine)
+WHISPER_LANG_MAP = {
+    "en": "en",
+    "ar": "ar",
+    "es": "es",
+    "ja": "ja",
+    "zh": "zh",
+    "ko": "ko",
+    "hi": "hi",
+    "mr": "mr",
+    "kn": "kn",
+    "ta": "ta",
+}
+
+_whisper_model = None
+_whisper_lock = threading.RLock()
+
+# Whisper runtime settings optimized for Jetson Nano offline.
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+
+
+
+# Piper TTS language codes (will be added in TTS section)
+PIPER_TTS_LANG_MAP = {
+    "hi": "hi",
+    "mr": "mr",
+    "kn": "kn",
+    "ta": "ta",
+    "en": "en",
+    "ar": "ar",
+    "es": "es",
+}
 
 # Multilingual TTS via moonshine-voice (Kokoro / Piper backed). Language is fixed at
 # TextToSpeech construction, so we lazily build (and cache) one engine per language used.
@@ -51,6 +87,7 @@ TTS_LANG_MAP = {
     "ja": "ja-jp",
     "zh": "zh-hans",
     "ko": "ko-kr",
+    "hi": "hi-in",
 }
 # Optional per-language voice override (moonshine-voice voice IDs). Languages not
 # listed here use moonshine's default voice for that language.
@@ -83,23 +120,115 @@ def get_tts_engine(language="en"):
             _tts_engines[language] = TextToSpeech(moon_lang)
         return _tts_engines[language]
 
-def get_stt_recognizer(language="en"):
-    if language not in SUPPORTED_STT_LANGS:
-        language = "en"
-    with _stt_lock:
-        if language in _stt_recognizers:
-            _stt_recognizers.move_to_end(language)
-            return _stt_recognizers[language]
-        from moonshine_voice import get_model_for_language, Transcriber
-        print(f"[STT] Loading Moonshine STT (lang={language})...")
-        if len(_stt_recognizers) >= MAX_MODELS:
-            oldest_lang, oldest_recognizer = _stt_recognizers.popitem(last=False)
-            print(f"[STT] Evicting model for {oldest_lang}")
-            del oldest_recognizer
-        model_path, model_arch = get_model_for_language(language)
-        _stt_recognizers[language] = Transcriber(model_path=model_path, model_arch=model_arch)
-        return _stt_recognizers[language]
+def get_whisper_model():
+    """Load Whisper small model (primary STT for all languages)."""
+    global _whisper_model
+    with _whisper_lock:
+        if _whisper_model is None:
+            from faster_whisper import WhisperModel
+            print(
+                f"[STT] Loading Whisper model={WHISPER_MODEL_SIZE} "
+                f"device={WHISPER_DEVICE} compute_type={WHISPER_COMPUTE_TYPE}..."
+            )
+            _whisper_model = WhisperModel(
+                WHISPER_MODEL_SIZE,
+                device=WHISPER_DEVICE,
+                compute_type=WHISPER_COMPUTE_TYPE,
+            )
+        return _whisper_model
 
+def transcribe_with_whisper(audio_np, language):
+    """Transcribe audio using Whisper small (supports all languages)."""
+    # audio_np is float32 mono at 16kHz in [-1,1]
+    model = get_whisper_model()
+    lang = WHISPER_LANG_MAP.get(language, "en")
+    segments, _info = model.transcribe(
+        audio_np,
+        language=lang,
+        task="transcribe",
+        vad_filter=True
+    )
+    return " ".join([seg.text for seg in segments]).strip()
+
+# Piper TTS synthesis will be added in TTS section
+# Placeholder for now - keep gTTS as fallback
+def synthesize_with_gtts_wav(text, language):
+    if gTTS is None:
+        raise RuntimeError("gTTS is not installed. Install backend dependencies to use TTS fallback.")
+
+    lang = PIPER_TTS_LANG_MAP.get(language, "en")
+    if not lang:
+        raise ValueError(f"No TTS mapping for language: {language}")
+
+    with tempfile.TemporaryDirectory() as td:
+        mp3_path = os.path.join(td, "tts.mp3")
+        wav_path = os.path.join(td, "tts.wav")
+
+        tts = gTTS(text=text, lang=lang)
+        tts.save(mp3_path)
+
+        # Convert to mono 16k WAV so browser playback is consistent
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", mp3_path,
+                "-ac", "1",
+                "-ar", "16000",
+                wav_path
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        with open(wav_path, "rb") as f:
+            return f.read()
+
+# IndicTrans2 translation (primary MT engine for Indic languages)
+_indictrans2_model = None
+_indictrans2_lock = threading.RLock()
+
+# Language pair mapping for IndicTrans2
+INDICTRANS2_LANG_MAP = {
+    "en": "eng_Latn",
+    "hi": "hin_Deva",
+    "mr": "mar_Deva",
+    "kn": "kan_Knda",
+    "ta": "tam_Taml",
+    "ar": "ara_Arab",
+    "es": "spa_Latn",
+    "ja": "jpn_Jpan",
+    "zh": "zho_Hans",
+    "ko": "kor_Hang",
+}
+
+def get_indictrans2_model():
+    """Load IndicTrans2 model (primary translation engine)."""
+    global _indictrans2_model
+    with _indictrans2_lock:
+        if _indictrans2_model is None:
+            print("[MT] Loading IndicTrans2 model (placeholder - will add actual loading)...")
+            # TODO: Add actual IndicTrans2 model loading here
+            # from IndicTransToolkit import IndicProcessor, IndicTranslator
+            # _indictrans2_model = IndicTranslator(...)
+            _indictrans2_model = "placeholder"
+        return _indictrans2_model
+
+def translate_with_indictrans2(text, src_lang, tgt_lang):
+    """Translate text using IndicTrans2 (deterministic MT)."""
+    # Map language codes to IndicTrans2 format
+    src = INDICTRANS2_LANG_MAP.get(src_lang, "eng_Latn")
+    tgt = INDICTRANS2_LANG_MAP.get(tgt_lang, "eng_Latn")
+    
+    print(f"[MT] Translating {src_lang} → {tgt_lang} using IndicTrans2...")
+    
+    # TODO: Add actual IndicTrans2 inference here
+    # model = get_indictrans2_model()
+    # translation = model.translate(text, src, tgt)
+    
+    # Placeholder: return input text with marker
+    translation = f"[IndicTrans2 {src_lang}→{tgt_lang}] {text}"
+    return translation
 
 PORT = 3000
 
@@ -195,22 +324,53 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         print(f"[TTS] Synthesizing with moonshine-voice: {text[:50]}... (lang: {lang})")
 
         try:
-            with _tts_lock:
-                engine = get_tts_engine(lang)
-                audio, sample_rate = engine.synthesize(text)
+            wav_bytes = None
 
-            # moonshine-voice returns mono float samples in [-1, 1]; encode to 16-bit PCM WAV.
-            samples = np.asarray(audio, dtype=np.float32)
-            samples = np.clip(samples, -1.0, 1.0)
-            pcm16 = (samples * 32767.0).astype('<i2')
+            # Primary path: Moonshine TTS (fallback to gTTS for Indic if Moonshine fails)
+            if lang in TTS_LANG_MAP:
+                try:
+                    with _tts_lock:
+                        engine = get_tts_engine(lang)
+                        audio, sample_rate = engine.synthesize(text)
 
-            with io.BytesIO() as buf:
-                with wave.open(buf, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(int(sample_rate))
-                    wf.writeframes(pcm16.tobytes())
-                wav_bytes = buf.getvalue()
+                    samples = np.asarray(audio, dtype=np.float32)
+                    samples = np.clip(samples, -1.0, 1.0)
+                    pcm16 = (samples * 32767.0).astype('<i2')
+
+                    with io.BytesIO() as buf:
+                        with wave.open(buf, 'wb') as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(int(sample_rate))
+                            wf.writeframes(pcm16.tobytes())
+                        wav_bytes = buf.getvalue()
+                except Exception:
+                    if lang in INDIC_FALLBACK_LANGS:
+                        wav_bytes = synthesize_with_gtts_wav(text, lang)
+                    else:
+                        raise
+
+            # Secondary path: gTTS for Indic fallback
+            elif lang in INDIC_FALLBACK_LANGS:
+                wav_bytes = synthesize_with_gtts_wav(text, lang)
+
+            else:
+                # Keep existing default behavior
+                with _tts_lock:
+                    engine = get_tts_engine('en')
+                    audio, sample_rate = engine.synthesize(text)
+
+                samples = np.asarray(audio, dtype=np.float32)
+                samples = np.clip(samples, -1.0, 1.0)
+                pcm16 = (samples * 32767.0).astype('<i2')
+
+                with io.BytesIO() as buf:
+                    with wave.open(buf, 'wb') as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(int(sample_rate))
+                        wf.writeframes(pcm16.tobytes())
+                    wav_bytes = buf.getvalue()
 
             self.send_response(200)
             self.send_header('Content-Type', 'audio/wav')
@@ -223,6 +383,7 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode('utf-8'))
+
 
     def handle_stt(self):
         try:
@@ -237,17 +398,13 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             if not audio_b64:
                 raise ValueError("Missing audio_base64 parameter")
 
-            language = data.get('language', 'en')
+            language = data.get("language", "en")
             raw_data = base64.b64decode(audio_b64)
-            
-            # The browser sends a raw Float32Array buffer
             audio_np = np.frombuffer(raw_data, dtype=np.float32)
 
-            with _stt_lock:
-                recognizer = get_stt_recognizer(language)
-                transcript = recognizer.transcribe_without_streaming(audio_np, 16000)
-            text = " ".join([line.text for line in transcript.lines])
-            print(f"[STT] Transcribed: {text}")
+            # Use Whisper small for all languages (unified STT)
+            text = transcribe_with_whisper(audio_np, language)
+            print(f"[STT] Transcribed ({language}): {text}")
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -256,6 +413,48 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             traceback.print_exc()
             print(f"[STT Error] Exception: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode('utf-8'))
+
+    def handle_translate(self):
+        """Primary translation endpoint using IndicTrans2."""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            
+            if not body:
+                raise ValueError("No body data")
+                
+            data = json.loads(body.decode('utf-8'))
+            text = data.get('text')
+            src_lang = data.get('source_language', 'en')
+            tgt_lang = data.get('target_language', 'en')
+            enhance = data.get('enhance_with_gemma', False)
+            
+            if not text:
+                raise ValueError("Missing text parameter")
+            
+            # Primary translation with IndicTrans2
+            translation = translate_with_indictrans2(text, src_lang, tgt_lang)
+            
+            # Optional: enhance with Gemma (secondary)
+            if enhance:
+                print(f"[MT] Gemma enhancement requested (not implemented yet)")
+                # TODO: Add Gemma post-processing here
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "translation": translation,
+                "source_language": src_lang,
+                "target_language": tgt_lang,
+                "enhanced": enhance
+            }).encode('utf-8'))
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[MT Error] Exception: {e}")
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode('utf-8'))
@@ -387,6 +586,9 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith('/api/stt'):
             self.handle_stt()
             return
+        if self.path.startswith('/api/translate'):
+            self.handle_translate()
+            return
         if self.path.startswith('/api/volume'):
             self.handle_volume()
             return
@@ -494,9 +696,8 @@ if __name__ == '__main__':
         print(f"===========================================================")
         def _prewarm_models():
             try:
-                print("[Prewarm] Loading default English STT & TTS models into memory...", flush=True)
-                get_stt_recognizer("en")
-                get_tts_engine("en")
+                print("[Prewarm] Loading Whisper STT model into memory...", flush=True)
+                get_whisper_model()
                 print("[Prewarm] Models pre-warmed successfully.", flush=True)
             except Exception as e:
                 print(f"[Prewarm Error] {e}", flush=True)

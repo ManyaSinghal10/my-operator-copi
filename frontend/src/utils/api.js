@@ -50,7 +50,7 @@ export async function testConnectionAPI(endpointUrl, useProxy, apiKey) {
   return true
 }
 
-// POST base64 Float32 PCM (16 kHz mono) to the local Moonshine STT.
+// POST base64 Float32 PCM (16 kHz mono) to the local Whisper STT.
 export async function transcribeAudio(base64Data, sourceLangCode) {
   const response = await fetch("/api/stt", {
     method: "POST",
@@ -69,84 +69,35 @@ export async function transcribeAudio(base64Data, sourceLangCode) {
   return sttData.text || ""
 }
 
-function generatePayloadJSON(transcribedText, model, systemPrompt) {
-  const messages = []
-  if (systemPrompt && systemPrompt.trim()) {
-    messages.push({ role: "system", content: systemPrompt.trim() })
-  }
-  messages.push({
-    role: "user",
-    content: transcribedText,
-  })
-
-  return JSON.stringify({ model: model || "gemma4-e2b", messages })
-}
-
-// Chat-completions request. The system prompt demands a bare
-// {"translation": ...} JSON object; we still tolerate ``` fences and fall
-// back to the raw reply text if parsing fails.
+// Translate text using local IndicTrans2 backend (primary MT).
 export async function translateText(transcribedText, config) {
-  const { endpointUrl, useProxy, apiKey, modelName, systemPrompt } = config
-  const baseUrl = getNormalizedBaseUrl(endpointUrl)
-  const targetUrl = `${baseUrl}/chat/completions`
-  const payload = generatePayloadJSON(transcribedText, modelName, systemPrompt)
-
-  const headers = { "Content-Type": "application/json" }
-  if (apiKey && apiKey.trim() !== "") {
-    headers["Authorization"] = `Bearer ${apiKey.trim()}`
-  }
-
-  const fetchUrl = useProxy
-    ? `/proxy?url=${encodeURIComponent(targetUrl)}`
-    : targetUrl
+  const { sourceLang, targetLang, enhanceWithGemma } = config
   const startRequestTime = Date.now()
 
-  const response = await fetch(fetchUrl, {
+  const response = await fetch("/api/translate", {
     method: "POST",
-    headers,
-    body: payload,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text: transcribedText,
+      source_language: sourceLang,
+      target_language: targetLang,
+      enhance_with_gemma: enhanceWithGemma || false,
+    }),
   })
   const requestDuration = ((Date.now() - startRequestTime) / 1000).toFixed(2)
 
   if (!response.ok) {
     const errorText = await response.text()
     throw new Error(
-      `API ${response.status}: ${errorText || response.statusText}`,
+      `Translation failed ${response.status}: ${errorText || response.statusText}`,
     )
   }
 
   const data = await response.json()
-  let modelResponse = ""
-  if (data.choices && data.choices[0] && data.choices[0].message) {
-    modelResponse = data.choices[0].message.content || ""
-  } else {
-    modelResponse = JSON.stringify(data, null, 2)
-  }
-
-  let translationVal = ""
-  try {
-    let cleanJson = modelResponse.trim()
-    if (cleanJson.startsWith("```json")) {
-      cleanJson = cleanJson.slice(7)
-    }
-    if (cleanJson.startsWith("```")) {
-      cleanJson = cleanJson.slice(3)
-    }
-    if (cleanJson.endsWith("```")) {
-      cleanJson = cleanJson.slice(0, -3)
-    }
-    cleanJson = cleanJson.trim()
-
-    const parsed = JSON.parse(cleanJson)
-    translationVal = parsed.translation || ""
-  } catch (e) {
-    translationVal = modelResponse
-  }
-
   return {
-    translation: translationVal,
+    translation: data.translation || "",
     duration: requestDuration,
-    tokens: data.usage?.total_tokens || 0,
+    tokens: 0, // Not applicable for IndicTrans2
   }
 }
 
