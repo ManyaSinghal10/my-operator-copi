@@ -23,3 +23,13 @@ server.log
 *.ogg
 *.flac
 coverage/
+# IndicConformer model files
+*.onnx
+*.onnx_data
+# Model files
+*.onnx
+*.onnx_data
+
+# Local model directories
+indicconformer_test/model/
+models/
