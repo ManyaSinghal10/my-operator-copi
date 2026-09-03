@@ -28,20 +28,17 @@ import { playBlip } from "./utils/audio-blip"
 
 // Core orchestrator for the two-person kiosk translator.
 // Flow: hold a key → record mic (useAudioRecorder) → POST /api/stt (Whisper)
-// → local /api/translate (IndicTrans2, optional Gemma enhancement) → /api/tts playback.
+// → local /api/translate (Gemma translation) → /api/tts playback.
 
 // Languages offered on each lane's revolver; ttsLang selects the backend voice.
 const AVAILABLE_LANGUAGES = [
-  { code: "ar", name: "Arabic", voice: "tts", ttsLang: "ar" },
+  { code: "gu", name: "Gujarati", voice: "tts", ttsLang: "gu"},
   { code: "en", name: "English", voice: "tts", ttsLang: "en" },
-  { code: "es", name: "Spanish", voice: "tts", ttsLang: "es" },
-  { code: "ja", name: "Japanese", voice: "tts", ttsLang: "ja" },
-  { code: "zh", name: "Chinese", voice: "tts", ttsLang: "zh" },
-  { code: "ko", name: "Korean", voice: "tts", ttsLang: "ko" },
   { code: "hi", name: "Hindi", voice: "tts", ttsLang: "hi" },
   { code: "mr", name: "Marathi", voice: "tts", ttsLang: "mr" },
   { code: "kn", name: "Kannada", voice: "tts", ttsLang: "kn" },
   { code: "ta", name: "Tamil", voice: "tts", ttsLang: "ta" },
+  { code: "te", name: "Telugu", voice: "tts", ttsLang: "te" },
 ]
 
 function TranslatorApp({ config }) {
@@ -226,7 +223,7 @@ function TranslatorApp({ config }) {
       const result = await translateText(transcribedText, {
         sourceLang: src.code,
         targetLang: dst.code,
-        enhanceWithGemma: config.enhanceWithGemma || false,
+  
       })
 
       setTranslationData((prev) => ({ ...prev, text: result.translation }))

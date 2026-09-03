@@ -119,7 +119,7 @@ export function useAudioRecorder() {
 
     const mergedSamples = getMergedSamples(recordedSamplesRef.current)
     recordedSamplesRef.current = []
-    const targetSampleRate = 16000 // Moonshine STT expects 16 kHz mono
+    const targetSampleRate = 16000 // IndicConformer STT expects 16 kHz mono
     const resampledSamples = resample(
       mergedSamples,
       actualSampleRate,

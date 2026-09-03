@@ -69,35 +69,88 @@ export async function transcribeAudio(base64Data, sourceLangCode) {
   return sttData.text || ""
 }
 
-// Translate text using local IndicTrans2 backend (primary MT).
-export async function translateText(transcribedText, config) {
-  const { sourceLang, targetLang, enhanceWithGemma } = config
-  const startRequestTime = Date.now()
-
-  const response = await fetch("/api/translate", {
+export async function evaluateSTT(
+  base64Data,
+  sourceLangCode,
+  reference
+) {
+  const response = await fetch("/api/stt/accuracy", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+
+    headers: {
+      "Content-Type": "application/json",
+    },
+
     body: JSON.stringify({
-      text: transcribedText,
-      source_language: sourceLang,
-      target_language: targetLang,
-      enhance_with_gemma: enhanceWithGemma || false,
+      audio_base64: base64Data,
+      language: sourceLangCode,
+      reference: reference,
     }),
   })
-  const requestDuration = ((Date.now() - startRequestTime) / 1000).toFixed(2)
 
   if (!response.ok) {
-    const errorText = await response.text()
     throw new Error(
-      `Translation failed ${response.status}: ${errorText || response.statusText}`,
+      `STT accuracy failed: ${response.status}`
     )
   }
 
-  const data = await response.json()
+  return await response.json()
+}
+
+// Translate text using local IndicTrans2 backend (primary MT).
+export async function translateText(
+  transcribedText,
+  config
+) {
+  const {
+    sourceLang,
+  } = config
+
+  const targetLang = "en"
+
+  const startRequestTime = Date.now()
+
+  const response = await fetch(
+    "/api/translate",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: transcribedText,
+        source_language: sourceLang,
+        target_language: targetLang,
+      }),
+    }
+  )
+
+  const requestDuration =
+    (
+      (Date.now() - startRequestTime) /
+      1000
+    ).toFixed(2)
+
+  if (!response.ok) {
+    const errorText =
+      await response.text()
+
+    throw new Error(
+      `Translation failed ${response.status}: ${
+        errorText || response.statusText
+      }`
+    )
+  }
+
+  const data =
+    await response.json()
+
   return {
-    translation: data.translation || "",
-    duration: requestDuration,
-    tokens: 0, // Not applicable for IndicTrans2
+    translation:
+      data.translation || "",
+
+    duration:
+      requestDuration,
   }
 }
 

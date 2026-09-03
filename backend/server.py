@@ -26,6 +26,32 @@ import wave
 import traceback
 import socket
 import ssl
+import onnx_asr
+import threading
+from jiwer import wer, cer
+
+INDICCONFORMER_MODELS = {
+    "kn": "OpenVoiceOS/ai4bharat-indicconformer-kn-onnx",
+    "mr": "OpenVoiceOS/ai4bharat-indicconformer-mr-onnx",
+    "hi": "OpenVoiceOS/ai4bharat-indicconformer-hi-onnx",
+    "gu": "OpenVoiceOS/ai4bharat-indicconformer-gu-onnx",
+    "bn": "OpenVoiceOS/ai4bharat-indicconformer-bn-onnx",
+    "ta": "OpenVoiceOS/ai4bharat-indicconformer-ta-onnx",
+    "te": "OpenVoiceOS/ai4bharat-indicconformer-te-onnx",
+}
+
+_indicconformer_models = {}
+_indicconformer_lock = threading.RLock()
+
+STT_TEST_REFERENCES = {
+    "kn": "ನಮಸ್ಕಾರ, ನೀವು ಹೇಗಿದ್ದೀರಿ",
+    "mr": "नमस्कार, तुम्ही कसे आहात",
+    "hi": "नमस्ते, आप कैसे हैं",
+    "ta": "வணக்கம், நீங்கள் எப்படி இருக்கிறீர்கள்",
+    "te": "నమస్కారం, మీరు ఎలా ఉన్నారు",
+    "gu": "નમસ્તે, તમે કેમ છો",
+    "bn": "নমস্কার, আপনি কেমন আছেন",
+}
 
 import threading
 from collections import OrderedDict
@@ -56,14 +82,36 @@ WHISPER_LANG_MAP = {
     "ta": "ta",
 }
 
-_whisper_model = None
-_whisper_lock = threading.RLock()
+# IndicConformer ONNX STT
+# ============================================================
 
-# Whisper runtime settings optimized for Jetson Nano offline.
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+_INDICCONFORMER_MODELS = {}
+_indicconformer_lock = threading.RLock()
 
+INDICCONFORMER_MODEL_PATHS = {
+    "kn": os.path.join(
+        BASE_DIR,
+        "../indicconformer_test/model"
+    ),
+}
+
+def get_indicconformer_model(language):
+    if language not in INDICCONFORMER_MODELS:
+        raise ValueError(
+            f"IndicConformer model not configured for language: {language}"
+        )
+
+    with _indicconformer_lock:
+        if language not in _indicconformer_models:
+            model_id = INDICCONFORMER_MODELS[language]
+
+            print(f"[IndicConformer] Loading model: {model_id}")
+
+            _indicconformer_models[language] = onnx_asr.load_model(model_id)
+
+            print(f"[IndicConformer] Model loaded: {language}")
+
+        return _indicconformer_models[language]
 
 
 # Piper TTS language codes (will be added in TTS section)
@@ -137,18 +185,17 @@ def get_whisper_model():
             )
         return _whisper_model
 
-def transcribe_with_whisper(audio_np, language):
-    """Transcribe audio using Whisper small (supports all languages)."""
-    # audio_np is float32 mono at 16kHz in [-1,1]
-    model = get_whisper_model()
-    lang = WHISPER_LANG_MAP.get(language, "en")
-    segments, _info = model.transcribe(
-        audio_np,
-        language=lang,
-        task="transcribe",
-        vad_filter=True
-    )
-    return " ".join([seg.text for seg in segments]).strip()
+def transcribe_with_indicconformer(audio_np, language):
+    model = get_indicconformer_model(language)
+
+    print(f"[IndicConformer] Transcribing language: {language}")
+    print(f"[IndicConformer] Audio samples: {len(audio_np)}")
+
+    result = model.recognize(audio_np)
+
+    print(f"[IndicConformer] Result: {result}")
+
+    return result.strip()
 
 # Piper TTS synthesis will be added in TTS section
 # Placeholder for now - keep gTTS as fallback
@@ -184,53 +231,98 @@ def synthesize_with_gtts_wav(text, language):
         with open(wav_path, "rb") as f:
             return f.read()
 
-# IndicTrans2 translation (primary MT engine for Indic languages)
-_indictrans2_model = None
-_indictrans2_lock = threading.RLock()
+def translate_with_gemma(text, src_lang, tgt_lang):
+    """Translate text using the local Gemma model via LiteRT-LM."""
 
-# Language pair mapping for IndicTrans2
-INDICTRANS2_LANG_MAP = {
-    "en": "eng_Latn",
-    "hi": "hin_Deva",
-    "mr": "mar_Deva",
-    "kn": "kan_Knda",
-    "ta": "tam_Taml",
-    "ar": "ara_Arab",
-    "es": "spa_Latn",
-    "ja": "jpn_Jpan",
-    "zh": "zho_Hans",
-    "ko": "kor_Hang",
-}
+    language_names = {
+        "en": "English",
+        "hi": "Hindi",
+        "mr": "Marathi",
+        "kn": "Kannada",
+        "ta": "Tamil",
+        "te": "Telugu",
+        "bn": "Bengali",
+        "gu": "Gujarati",
+        "ml": "Malayalam",
+        "pa": "Punjabi",
+        "or": "Odia",
+    }
 
-def get_indictrans2_model():
-    """Load IndicTrans2 model (primary translation engine)."""
-    global _indictrans2_model
-    with _indictrans2_lock:
-        if _indictrans2_model is None:
-            print("[MT] Loading IndicTrans2 model (placeholder - will add actual loading)...")
-            # TODO: Add actual IndicTrans2 model loading here
-            # from IndicTransToolkit import IndicProcessor, IndicTranslator
-            # _indictrans2_model = IndicTranslator(...)
-            _indictrans2_model = "placeholder"
-        return _indictrans2_model
+    src_name = language_names.get(src_lang, src_lang)
+    tgt_name = language_names.get(tgt_lang, tgt_lang)
 
-def translate_with_indictrans2(text, src_lang, tgt_lang):
-    """Translate text using IndicTrans2 (deterministic MT)."""
-    # Map language codes to IndicTrans2 format
-    src = INDICTRANS2_LANG_MAP.get(src_lang, "eng_Latn")
-    tgt = INDICTRANS2_LANG_MAP.get(tgt_lang, "eng_Latn")
-    
-    print(f"[MT] Translating {src_lang} → {tgt_lang} using IndicTrans2...")
-    
-    # TODO: Add actual IndicTrans2 inference here
-    # model = get_indictrans2_model()
-    # translation = model.translate(text, src, tgt)
-    
-    # Placeholder: return input text with marker
-    translation = f"[IndicTrans2 {src_lang}→{tgt_lang}] {text}"
+    prompt = f"""
+You are a professional translator.
+
+Translate the following text from {src_name} to {tgt_name}.
+
+Rules:
+- Preserve the exact meaning.
+- Do not add information.
+- Do not explain the translation.
+- Do not summarize.
+- Return ONLY the translated text.
+- Preserve names, numbers, dates, and places accurately.
+
+Source text:
+{text}
+""".strip()
+
+    print("\n========== GEMMA TRANSLATION ==========")
+    print(f"Source language : {src_name} ({src_lang})")
+    print(f"Target language : {tgt_name} ({tgt_lang})")
+    print(f"Input text      : {text}")
+
+    payload = {
+        "model": "gemma4-e2b",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "max_tokens": 512,
+        "temperature": 0.1,
+    }
+
+    request = urllib.request.Request(
+        "http://localhost:9379/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=300) as response:
+        result = json.loads(response.read().decode("utf-8"))
+
+    translation = (
+        result["choices"][0]["message"]["content"]
+        .strip()
+    )
+
+    print(f"Gemma output    : {translation}")
+    print("=======================================\n")
+
     return translation
 
 PORT = 3000
+
+MAX_MODELS = 2
+
+INDIC_FALLBACK_LANGS = {
+    "hi",
+    "mr",
+    "kn",
+    "ta",
+    "te",
+    "bn",
+    "gu",
+    "ml",
+    "pa",
+    "or",
+}
 
 class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     def end_headers(self):
@@ -402,62 +494,156 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             raw_data = base64.b64decode(audio_b64)
             audio_np = np.frombuffer(raw_data, dtype=np.float32)
 
+            # Normalize microphone audio for Whisper
+            audio_np = audio_np.astype(np.float32)
+
+            peak = np.max(np.abs(audio_np))
+
+            if peak > 0:
+                audio_np = audio_np / peak
+
+            # Prevent clipping
+            audio_np = np.clip(audio_np, -1.0, 1.0)
+
+            print("\n========== AUDIO DEBUG ==========")
+            print            (f"Raw bytes       : {len(raw_data)}")
+            print(f"Samples         : {len(audio_np)}")
+            print(f"Duration        : {len(audio_np) / 16000:.2f} sec")
+            print(f"Dtype           : {audio_np.dtype}")
+            print(f"Min             : {audio_np.min():.4f}")
+            print(f"Max             : {audio_np.max():.4f}")
+            print(f"Mean            : {audio_np.mean():.4f}")
+            print(f"RMS             : {np.sqrt(np.mean(audio_np ** 2)):.4f}")
+            print(f"First 10 values : {audio_np[:10]}")
+            print("================================")
+
             # Use Whisper small for all languages (unified STT)
-            text = transcribe_with_whisper(audio_np, language)
+            text = transcribe_with_indicconformer(audio_np, language)
             print(f"[STT] Transcribed ({language}): {text}")
+
+            # ==========================================
+            # STT ACCURACY TEST
+            # ==========================================
+
+            reference = STT_TEST_REFERENCES.get(language)
+
+            if reference:
+                word_error_rate = wer(reference, text)
+                character_error_rate = cer(reference, text)
+
+                word_accuracy = max(
+                    0,
+                    (1 - word_error_rate) * 100
+                )
+
+                character_accuracy = max(
+                    0,
+                    (1 - character_error_rate) * 100
+                )
+
+                print()
+                print("========== STT ACCURACY ==========")
+                print(f"Language            : {language}")
+                print(f"Reference           : {reference}")
+                print(f"Prediction          : {text}")
+                print()
+                print(f"WER                 : {word_error_rate * 100:.2f}%")
+                print(f"CER                 : {character_error_rate * 100:.2f}%")
+                print(f"Word Accuracy       : {word_accuracy:.2f}%")
+                print(f"Character Accuracy : {character_accuracy:.2f}%")
+                print("==================================")
+                print()
+            else:
+                print(
+                    f"[STT Accuracy] No reference sentence configured for: {language}"
+                )
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({"text": text}).encode('utf-8'))
+
         except Exception as e:
             traceback.print_exc()
             print(f"[STT Error] Exception: {e}")
             self.send_response(500)
             self.end_headers()
-            self.wfile.write(str(e).encode('utf-8'))
+
+            self.wfile.write(
+            json.dumps({"error": str(e)}).encode('utf-8')
+        )
 
     def handle_translate(self):
-        """Primary translation endpoint using IndicTrans2."""
+        """Translate text using the local Gemma model."""
         try:
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = int(
+                self.headers.get("Content-Length", 0)
+            )
+
             body = self.rfile.read(content_length)
-            
+
             if not body:
                 raise ValueError("No body data")
-                
-            data = json.loads(body.decode('utf-8'))
-            text = data.get('text')
-            src_lang = data.get('source_language', 'en')
-            tgt_lang = data.get('target_language', 'en')
-            enhance = data.get('enhance_with_gemma', False)
-            
+
+            data = json.loads(
+                body.decode("utf-8")
+            )
+
+            text = data.get("text")
+            src_lang = data.get(
+                "source_language",
+                "en"
+            )
+            tgt_lang = data.get(
+                "target_language",
+                "en"
+            )
+
             if not text:
-                raise ValueError("Missing text parameter")
-            
-            # Primary translation with IndicTrans2
-            translation = translate_with_indictrans2(text, src_lang, tgt_lang)
-            
-            # Optional: enhance with Gemma (secondary)
-            if enhance:
-                print(f"[MT] Gemma enhancement requested (not implemented yet)")
-                # TODO: Add Gemma post-processing here
-            
+                raise ValueError(
+                    "Missing text parameter"
+                )
+
+            print(
+                f"[MT] Translating "
+                f"{src_lang} → {tgt_lang} "
+                f"using Gemma..."
+            )
+
+            translation = translate_with_gemma(
+                text,
+                src_lang,
+                tgt_lang,
+            )
+
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
+            self.send_header(
+                "Content-Type",
+                "application/json"
+            )
             self.end_headers()
-            self.wfile.write(json.dumps({
-                "translation": translation,
-                "source_language": src_lang,
-                "target_language": tgt_lang,
-                "enhanced": enhance
-            }).encode('utf-8'))
+
+            self.wfile.write(
+                json.dumps({
+                    "translation": translation,
+                    "source_language": src_lang,
+                    "target_language": tgt_lang,
+                }).encode("utf-8")
+            )
+
         except Exception as e:
             traceback.print_exc()
-            print(f"[MT Error] Exception: {e}")
+
+            print(
+                f"[MT Error] Exception: {e}"
+            )
+
             self.send_response(500)
             self.end_headers()
-            self.wfile.write(str(e).encode('utf-8'))
+
+            self.wfile.write(
+                str(e).encode("utf-8")
+            )
 
     def handle_volume(self):
         client_ip = self.client_address[0]
@@ -583,13 +769,16 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith('/proxy'):
             self.handle_proxy()
             return
+
         if self.path.startswith('/api/stt'):
             self.handle_stt()
             return
-        if self.path.startswith('/api/translate'):
+
+        elif self.path.startswith('/api/translate'):
             self.handle_translate()
             return
-        if self.path.startswith('/api/volume'):
+            
+        elif self.path.startswith('/api/volume'):
             self.handle_volume()
             return
         
@@ -694,15 +883,21 @@ if __name__ == '__main__':
         if local_ip != "localhost":
             print(f"👉 {protocol}://{local_ip}:{PORT} (Local Network)")
         print(f"===========================================================")
+        
         def _prewarm_models():
             try:
-                print("[Prewarm] Loading Whisper STT model into memory...", flush=True)
-                get_whisper_model()
-                print("[Prewarm] Models pre-warmed successfully.", flush=True)
+                print("[Prewarm] Loading IndicConformer Kannada model...", flush=True)
+
+                get_indicconformer_model("kn")
+
+                print("[Prewarm] IndicConformer ready.", flush=True)
+
             except Exception as e:
                 print(f"[Prewarm Error] {e}", flush=True)
 
+
         threading.Thread(target=_prewarm_models, daemon=True).start()
+
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
