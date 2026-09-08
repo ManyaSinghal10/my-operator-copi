@@ -53,6 +53,8 @@ STT_TEST_REFERENCES = {
     "bn": "নমস্কার, আপনি কেমন আছেন",
 }
 
+STT_SILENCE_RMS_THRESHOLD = 0.005
+
 import threading
 from collections import OrderedDict
 
@@ -494,16 +496,12 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             raw_data = base64.b64decode(audio_b64)
             audio_np = np.frombuffer(raw_data, dtype=np.float32)
 
-            # Normalize microphone audio for Whisper
-            audio_np = audio_np.astype(np.float32)
-
-            peak = np.max(np.abs(audio_np))
-
-            if peak > 0:
-                audio_np = audio_np / peak
-
-            # Prevent clipping
+            # IndicConformer expects Float32 PCM in the browser's native scale.
+            # Do not peak-normalize: that turns quiet room noise into a full-scale
+            # speech signal and causes short hallucinations on silent clips.
+            audio_np = np.nan_to_num(audio_np.astype(np.float32))
             audio_np = np.clip(audio_np, -1.0, 1.0)
+            rms = float(np.sqrt(np.mean(np.square(audio_np)))) if audio_np.size else 0.0
 
             print("\n========== AUDIO DEBUG ==========")
             print            (f"Raw bytes       : {len(raw_data)}")
@@ -517,8 +515,11 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             print(f"First 10 values : {audio_np[:10]}")
             print("================================")
 
-            # Use Whisper small for all languages (unified STT)
-            text = transcribe_with_indicconformer(audio_np, language)
+            if rms < STT_SILENCE_RMS_THRESHOLD:
+                text = ""
+                print(f"[STT] Silence detected (RMS={rms:.6f}); skipping inference")
+            else:
+                text = transcribe_with_indicconformer(audio_np, language)
             print(f"[STT] Transcribed ({language}): {text}")
 
             # ==========================================

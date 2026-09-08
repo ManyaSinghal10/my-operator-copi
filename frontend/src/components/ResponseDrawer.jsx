@@ -16,20 +16,14 @@
 
 import React from "react"
 
-// Result panel: transcription (left bubble) and translation (right bubble)
-// in a chat-style layout, with a first-run placeholder before any recording.
+// Result panel: a scrollable in-session chat between the two selected languages.
 export default function ResponseDrawer({
   isActive,
   onClose,
-  transcriptionSource,
-  transcriptionText,
-  translationTarget,
-  translationText,
-  metaText,
+  messages,
   placeholderText,
 }) {
-  // Determine if we have any data to show (or if the drawer was explicitly activated)
-  const hasData = isActive || transcriptionSource !== ""
+  const hasData = isActive || messages.length > 0
 
   return (
     <div
@@ -48,29 +42,25 @@ export default function ResponseDrawer({
             {placeholderText || "Select languages, push to talk"}
           </div>
         ) : (
-          <>
-            <div className="chat-row chat-row-left">
-              <div className="chat-bubble bubble-left">
-                <div className="bubble-label">
-                  {transcriptionSource || "LANG 1"}
+          <div className="chat-history">
+            {messages.map((message) => (
+              <article className="chat-exchange" key={message.id}>
+                <div className="chat-row chat-row-left">
+                  <div className="chat-bubble bubble-left">
+                    <div className="bubble-label">{message.source}</div>
+                    <div className="bubble-text">{message.text}</div>
+                  </div>
                 </div>
-                <div className="bubble-text">
-                  {transcriptionText || "— listening —"}
+                <div className="chat-row chat-row-right">
+                  <div className="chat-bubble bubble-right">
+                    <div className="bubble-label">{message.target}</div>
+                    <div className="bubble-text">{message.translation}</div>
+                  </div>
                 </div>
-              </div>
-            </div>
-            <div className="chat-row chat-row-right">
-              <div className="chat-bubble bubble-right">
-                <div className="bubble-label">
-                  {translationTarget || "LANG 2"}
-                </div>
-                <div className="bubble-text">
-                  {translationText || "— waiting —"}
-                </div>
-              </div>
-            </div>
-            <div className="chat-meta">{metaText}</div>
-          </>
+                <div className="chat-meta">{message.meta}</div>
+              </article>
+            ))}
+          </div>
         )}
       </div>
     </div>
