@@ -50,7 +50,7 @@ export async function testConnectionAPI(endpointUrl, useProxy, apiKey) {
   return true
 }
 
-// POST base64 Float32 PCM (16 kHz mono) to the local Whisper STT.
+// POST base64 Float32 PCM (16 kHz mono) to the local IndicConformer STT.
 export async function transcribeAudio(base64Data, sourceLangCode) {
   const response = await fetch("/api/stt", {
     method: "POST",
@@ -98,6 +98,8 @@ export async function evaluateSTT(
 }
 
 // Translate text using local IndicTrans2 backend (primary MT).
+// Target is fixed to English by design: translated text feeds the RAG search step,
+// not the other lane's language (that reverse leg is a separate phase).
 export async function translateText(
   transcribedText,
   config

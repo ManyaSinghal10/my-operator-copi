@@ -29,6 +29,7 @@ import ssl
 import onnx_asr
 import threading
 from jiwer import wer, cer
+from collections import OrderedDict
 
 INDICCONFORMER_MODELS = {
     "kn": "OpenVoiceOS/ai4bharat-indicconformer-kn-onnx",
@@ -40,10 +41,11 @@ INDICCONFORMER_MODELS = {
     "te": "OpenVoiceOS/ai4bharat-indicconformer-te-onnx",
 }
 
-_indicconformer_models = {}
+_indicconformer_models = OrderedDict()  # our-lang-code -> ASR model (LRU, capped at MAX_MODELS)
 _indicconformer_lock = threading.RLock()
 
 STT_TEST_REFERENCES = {
+    "en": "Namaste, how are you",
     "kn": "ನಮಸ್ಕಾರ, ನೀವು ಹೇಗಿದ್ದೀರಿ",
     "mr": "नमस्कार, तुम्ही कसे आहात",
     "hi": "नमस्ते, आप कैसे हैं",
@@ -53,47 +55,14 @@ STT_TEST_REFERENCES = {
     "bn": "নমস্কার, আপনি কেমন আছেন",
 }
 
-import threading
-from collections import OrderedDict
-
-import tempfile
-import subprocess
-try:
-    from gtts import gTTS
-except ImportError:
-    gTTS = None
-
-# Multilingual STT via Moonshine.
-# Language is fixed at recognizer construction, so we lazily build (and cache) one
-# recognizer per language actually used.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Whisper STT for all languages (primary STT engine)
-WHISPER_LANG_MAP = {
-    "en": "en",
-    "ar": "ar",
-    "es": "es",
-    "ja": "ja",
-    "zh": "zh",
-    "ko": "ko",
-    "hi": "hi",
-    "mr": "mr",
-    "kn": "kn",
-    "ta": "ta",
-}
+# Requested in priority order; onnxruntime silently falls back to the next
+# available provider, so this is safe even without a GPU build installed.
+ONNX_PROVIDERS = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
 # IndicConformer ONNX STT
 # ============================================================
-
-_INDICCONFORMER_MODELS = {}
-_indicconformer_lock = threading.RLock()
-
-INDICCONFORMER_MODEL_PATHS = {
-    "kn": os.path.join(
-        BASE_DIR,
-        "../indicconformer_test/model"
-    ),
-}
 
 def get_indicconformer_model(language):
     if language not in INDICCONFORMER_MODELS:
@@ -102,88 +71,22 @@ def get_indicconformer_model(language):
         )
 
     with _indicconformer_lock:
-        if language not in _indicconformer_models:
-            model_id = INDICCONFORMER_MODELS[language]
+        if language in _indicconformer_models:
+            _indicconformer_models.move_to_end(language)
+            return _indicconformer_models[language]
 
-            print(f"[IndicConformer] Loading model: {model_id}")
+        model_id = INDICCONFORMER_MODELS[language]
 
-            _indicconformer_models[language] = onnx_asr.load_model(model_id)
+        print(f"[IndicConformer] Loading model: {model_id}")
+        if len(_indicconformer_models) >= MAX_MODELS:
+            oldest_lang, _ = _indicconformer_models.popitem(last=False)
+            print(f"[IndicConformer] Evicting model for {oldest_lang}")
 
-            print(f"[IndicConformer] Model loaded: {language}")
+        _indicconformer_models[language] = onnx_asr.load_model(model_id, providers=ONNX_PROVIDERS)
+
+        print(f"[IndicConformer] Model loaded: {language}")
 
         return _indicconformer_models[language]
-
-
-# Piper TTS language codes (will be added in TTS section)
-PIPER_TTS_LANG_MAP = {
-    "hi": "hi",
-    "mr": "mr",
-    "kn": "kn",
-    "ta": "ta",
-    "en": "en",
-    "ar": "ar",
-    "es": "es",
-}
-
-# Multilingual TTS via moonshine-voice (Kokoro / Piper backed). Language is fixed at
-# TextToSpeech construction, so we lazily build (and cache) one engine per language used.
-# Maps our UI language codes -> moonshine-voice language codes.
-TTS_LANG_MAP = {
-    "ar": "ar-msa",
-    "en": "en-us",
-    "es": "es-es",
-    "ja": "ja-jp",
-    "zh": "zh-hans",
-    "ko": "ko-kr",
-    "hi": "hi-in",
-}
-# Optional per-language voice override (moonshine-voice voice IDs). Languages not
-# listed here use moonshine's default voice for that language.
-TTS_VOICE_MAP = {
-    "zh": "kokoro_zf_xiaoxiao",  # 晓晓 — soft, gentle female Mandarin
-}
-_tts_engines = OrderedDict()  # our-lang-code -> TextToSpeech
-# RLock (reentrant): handle_tts holds the lock across get_tts_engine() + synthesis,
-# and get_tts_engine() re-acquires it on the same thread. A plain Lock() self-deadlocks.
-_tts_lock = threading.RLock()
-
-def get_tts_engine(language="en"):
-    if language not in TTS_LANG_MAP:
-        language = "en"
-    with _tts_lock:
-        if language in _tts_engines:
-            _tts_engines.move_to_end(language)
-            return _tts_engines[language]
-        from moonshine_voice import TextToSpeech
-        moon_lang = TTS_LANG_MAP[language]
-        voice = TTS_VOICE_MAP.get(language)
-        print(f"[TTS] Loading moonshine-voice (lang={language} -> {moon_lang}, voice={voice or 'default'})...")
-        if len(_tts_engines) >= MAX_MODELS:
-            oldest_lang, oldest_engine = _tts_engines.popitem(last=False)
-            print(f"[TTS] Evicting model for {oldest_lang}")
-            del oldest_engine
-        if voice:
-            _tts_engines[language] = TextToSpeech(moon_lang, voice=voice)
-        else:
-            _tts_engines[language] = TextToSpeech(moon_lang)
-        return _tts_engines[language]
-
-def get_whisper_model():
-    """Load Whisper small model (primary STT for all languages)."""
-    global _whisper_model
-    with _whisper_lock:
-        if _whisper_model is None:
-            from faster_whisper import WhisperModel
-            print(
-                f"[STT] Loading Whisper model={WHISPER_MODEL_SIZE} "
-                f"device={WHISPER_DEVICE} compute_type={WHISPER_COMPUTE_TYPE}..."
-            )
-            _whisper_model = WhisperModel(
-                WHISPER_MODEL_SIZE,
-                device=WHISPER_DEVICE,
-                compute_type=WHISPER_COMPUTE_TYPE,
-            )
-        return _whisper_model
 
 def transcribe_with_indicconformer(audio_np, language):
     model = get_indicconformer_model(language)
@@ -197,39 +100,114 @@ def transcribe_with_indicconformer(audio_np, language):
 
     return result.strip()
 
-# Piper TTS synthesis will be added in TTS section
-# Placeholder for now - keep gTTS as fallback
-def synthesize_with_gtts_wav(text, language):
-    if gTTS is None:
-        raise RuntimeError("gTTS is not installed. Install backend dependencies to use TTS fallback.")
 
-    lang = PIPER_TTS_LANG_MAP.get(language, "en")
-    if not lang:
-        raise ValueError(f"No TTS mapping for language: {language}")
+# Whisper STT for English only (IndicConformer has no English model).
+WHISPER_MODEL_SIZE = "small.en"
+_whisper_model = None
+_whisper_lock = threading.RLock()
 
-    with tempfile.TemporaryDirectory() as td:
-        mp3_path = os.path.join(td, "tts.mp3")
-        wav_path = os.path.join(td, "tts.wav")
+def get_whisper_model():
+    global _whisper_model
+    with _whisper_lock:
+        if _whisper_model is None:
+            from faster_whisper import WhisperModel
 
-        tts = gTTS(text=text, lang=lang)
-        tts.save(mp3_path)
+            # Check torch's CUDA detection first: CTranslate2's own CUDA init can hang
+            # or crash the process (not a catchable exception) on a machine without a
+            # working driver/cuDNN, so don't attempt it blindly.
+            import torch
+            if torch.cuda.is_available():
+                print(f"[Whisper] Loading model={WHISPER_MODEL_SIZE} device=cuda compute_type=float16...")
+                try:
+                    _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
+                except Exception as e:
+                    print(f"[Whisper] CUDA load failed ({e}), falling back to CPU")
+                    _whisper_model = None
 
-        # Convert to mono 16k WAV so browser playback is consistent
-        subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-i", mp3_path,
-                "-ac", "1",
-                "-ar", "16000",
-                wav_path
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+            if _whisper_model is None:
+                print(f"[Whisper] Loading model={WHISPER_MODEL_SIZE} device=cpu compute_type=int8...")
+                _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+        return _whisper_model
 
-        with open(wav_path, "rb") as f:
-            return f.read()
+def transcribe_with_whisper(audio_np, language):
+    model = get_whisper_model()
+
+    print(f"[Whisper] Transcribing language: {language}")
+    print(f"[Whisper] Audio samples: {len(audio_np)}")
+
+    segments, _ = model.transcribe(audio_np, language="en")
+    result = "".join(segment.text for segment in segments).strip()
+
+    print(f"[Whisper] Result: {result}")
+
+    return result
+
+def transcribe_audio(audio_np, language):
+    if language == "en":
+        return transcribe_with_whisper(audio_np, language)
+    return transcribe_with_indicconformer(audio_np, language)
+
+
+# MMS-TTS (VITS) — fully local, one checkpoint per language.
+MMS_TTS_MODELS = {
+    "en": "facebook/mms-tts-eng",
+    "hi": "facebook/mms-tts-hin",
+    "mr": "facebook/mms-tts-mar",
+    "kn": "facebook/mms-tts-kan",
+    "ta": "facebook/mms-tts-tam",
+    "te": "facebook/mms-tts-tel",
+    "bn": "facebook/mms-tts-ben",
+    "gu": "facebook/mms-tts-guj",
+}
+_mms_tts_models = OrderedDict()  # our-lang-code -> (VitsModel, tokenizer, device)
+_mms_tts_lock = threading.RLock()
+
+def get_mms_tts_model(language):
+    if language not in MMS_TTS_MODELS:
+        raise ValueError(f"MMS-TTS model not configured for language: {language}")
+
+    with _mms_tts_lock:
+        if language in _mms_tts_models:
+            _mms_tts_models.move_to_end(language)
+            return _mms_tts_models[language]
+
+        import torch
+        from transformers import VitsModel, AutoTokenizer
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model_id = MMS_TTS_MODELS[language]
+        print(f"[TTS] Loading MMS-TTS model: {model_id} (device={device})")
+        if len(_mms_tts_models) >= MAX_MODELS:
+            oldest_lang, _ = _mms_tts_models.popitem(last=False)
+            print(f"[TTS] Evicting model for {oldest_lang}")
+        model = VitsModel.from_pretrained(model_id).to(device)
+        model.eval()
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        _mms_tts_models[language] = (model, tokenizer, device)
+        print(f"[TTS] Model loaded: {language}")
+        return _mms_tts_models[language]
+
+def synthesize_with_mms_tts(text, language):
+    import torch
+
+    model, tokenizer, device = get_mms_tts_model(language)
+
+    with _mms_tts_lock:
+        inputs = tokenizer(text, return_tensors="pt").to(device)
+        with torch.no_grad():
+            waveform = model(**inputs).waveform
+
+    samples = waveform.squeeze().cpu().numpy().astype(np.float32)
+    samples = np.clip(samples, -1.0, 1.0)
+    pcm16 = (samples * 32767.0).astype('<i2')
+
+    with io.BytesIO() as buf:
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(int(model.config.sampling_rate))
+            wf.writeframes(pcm16.tobytes())
+        return buf.getvalue()
 
 def translate_with_gemma(text, src_lang, tgt_lang):
     """Translate text using the local Gemma model via LiteRT-LM."""
@@ -310,19 +288,6 @@ Source text:
 PORT = 3000
 
 MAX_MODELS = 2
-
-INDIC_FALLBACK_LANGS = {
-    "hi",
-    "mr",
-    "kn",
-    "ta",
-    "te",
-    "bn",
-    "gu",
-    "ml",
-    "pa",
-    "or",
-}
 
 class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     def end_headers(self):
@@ -413,56 +378,10 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b'Error: Missing "text" parameter.')
             return
 
-        print(f"[TTS] Synthesizing with moonshine-voice: {text[:50]}... (lang: {lang})")
+        print(f"[TTS] Synthesizing with MMS-TTS: {text[:50]}... (lang: {lang})")
 
         try:
-            wav_bytes = None
-
-            # Primary path: Moonshine TTS (fallback to gTTS for Indic if Moonshine fails)
-            if lang in TTS_LANG_MAP:
-                try:
-                    with _tts_lock:
-                        engine = get_tts_engine(lang)
-                        audio, sample_rate = engine.synthesize(text)
-
-                    samples = np.asarray(audio, dtype=np.float32)
-                    samples = np.clip(samples, -1.0, 1.0)
-                    pcm16 = (samples * 32767.0).astype('<i2')
-
-                    with io.BytesIO() as buf:
-                        with wave.open(buf, 'wb') as wf:
-                            wf.setnchannels(1)
-                            wf.setsampwidth(2)
-                            wf.setframerate(int(sample_rate))
-                            wf.writeframes(pcm16.tobytes())
-                        wav_bytes = buf.getvalue()
-                except Exception:
-                    if lang in INDIC_FALLBACK_LANGS:
-                        wav_bytes = synthesize_with_gtts_wav(text, lang)
-                    else:
-                        raise
-
-            # Secondary path: gTTS for Indic fallback
-            elif lang in INDIC_FALLBACK_LANGS:
-                wav_bytes = synthesize_with_gtts_wav(text, lang)
-
-            else:
-                # Keep existing default behavior
-                with _tts_lock:
-                    engine = get_tts_engine('en')
-                    audio, sample_rate = engine.synthesize(text)
-
-                samples = np.asarray(audio, dtype=np.float32)
-                samples = np.clip(samples, -1.0, 1.0)
-                pcm16 = (samples * 32767.0).astype('<i2')
-
-                with io.BytesIO() as buf:
-                    with wave.open(buf, 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(int(sample_rate))
-                        wf.writeframes(pcm16.tobytes())
-                    wav_bytes = buf.getvalue()
+            wav_bytes = synthesize_with_mms_tts(text, lang)
 
             self.send_response(200)
             self.send_header('Content-Type', 'audio/wav')
@@ -494,7 +413,7 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             raw_data = base64.b64decode(audio_b64)
             audio_np = np.frombuffer(raw_data, dtype=np.float32)
 
-            # Normalize microphone audio for Whisper
+            # Normalize microphone audio for IndicConformer
             audio_np = audio_np.astype(np.float32)
 
             peak = np.max(np.abs(audio_np))
@@ -517,8 +436,8 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             print(f"First 10 values : {audio_np[:10]}")
             print("================================")
 
-            # Use Whisper small for all languages (unified STT)
-            text = transcribe_with_indicconformer(audio_np, language)
+            # English uses Whisper; Indian languages use IndicConformer
+            text = transcribe_audio(audio_np, language)
             print(f"[STT] Transcribed ({language}): {text}")
 
             # ==========================================
@@ -856,6 +775,12 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(str(e).encode('utf-8'))
 
 if __name__ == '__main__':
+    # Once models are cached (see download_stt_tts_models.sh), skip Hugging Face
+    # Hub's "check for updates" network call — it can hang/block a request thread
+    # for a long time with no internet. prefetch_models.py runs separately and
+    # doesn't hit this guard, so real downloads there are unaffected.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
     # Allow port reuse
     socketserver.TCPServer.allow_reuse_address = True
     local_ip = "localhost"

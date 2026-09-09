@@ -14,12 +14,14 @@ httpcore==1.0.9
 httpx==0.28.1
 huggingface_hub==1.21.0
 idna==3.18
+jiwer==3.1.0
 litert-lm==0.13.1
 litert-lm-api==0.13.1
 litert-lm-builder==0.13.0
 markdown-it-py==4.2.0
 mdurl==0.1.2
 numpy==2.5.1
+onnx_asr
 packaging==26.2
 platformdirs==4.10.0
 prompt_toolkit==3.0.52
@@ -39,4 +41,14 @@ typing_extensions==4.15.0
 urllib3==2.7.0
 wcwidth==0.8.1
 faster-whisper==1.1.1
-gTTS==2.5.4
+# torch: on Jetson Orin Nano (JetPack 6.2.1, Ubuntu 22.04, Python 3.10), do NOT install
+# this plain PyPI entry. Per NVIDIA's compatibility matrix, JetPack 6.2.x pairs with
+# PyTorch 2.8.0 — follow the official install steps (they change per release) at
+# https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html
+# and skip the `pip install torch` line below.
+#
+# onnxruntime (used by onnx_asr, below) is CPU-only by default too; for GPU/TensorRT
+# acceleration on Jetson you need a JetPack-6.2-built `onnxruntime-gpu` wheel (NVIDIA
+# Jetson Zoo / Jetson AI Lab), not the PyPI package.
+torch
+transformers

@@ -27,10 +27,11 @@ import {
 import { playBlip } from "./utils/audio-blip"
 
 // Core orchestrator for the two-person kiosk translator.
-// Flow: hold a key → record mic (useAudioRecorder) → POST /api/stt (Whisper)
+// Flow: hold a key → record mic (useAudioRecorder) → POST /api/stt (IndicConformer)
 // → local /api/translate (Gemma translation) → /api/tts playback.
 
 // Languages offered on each lane's revolver; ttsLang selects the backend voice.
+// Kept in sync with INDICCONFORMER_MODELS in backend/server.py (Indian-language STT only).
 const AVAILABLE_LANGUAGES = [
   { code: "gu", name: "Gujarati", voice: "tts", ttsLang: "gu"},
   { code: "en", name: "English", voice: "tts", ttsLang: "en" },
@@ -39,6 +40,7 @@ const AVAILABLE_LANGUAGES = [
   { code: "kn", name: "Kannada", voice: "tts", ttsLang: "kn" },
   { code: "ta", name: "Tamil", voice: "tts", ttsLang: "ta" },
   { code: "te", name: "Telugu", voice: "tts", ttsLang: "te" },
+  { code: "bn", name: "Bengali", voice: "tts", ttsLang: "bn" },
 ]
 
 function TranslatorApp({ config }) {
@@ -127,8 +129,7 @@ function TranslatorApp({ config }) {
     [stopSpeaking],
   )
 
-  // Rotate a lane's language, skipping the slot held by the other lane
-  // (the two lanes may never show the same language).
+  // Rotate a lane's language independently; lanes may show the same language.
   const handleRotateLanguage = useCallback(
     (lane, direction) => {
       if (isRecording) return
@@ -137,13 +138,9 @@ function TranslatorApp({ config }) {
       playBlip("language")
 
       if (lane === 1) {
-        let ni = (lang1Index + direction + N) % N
-        if (ni === lang2Index) ni = (ni + direction + N) % N
-        setLang1Index(ni)
+        setLang1Index((lang1Index + direction + N) % N)
       } else {
-        let ni = (lang2Index + direction + N) % N
-        if (ni === lang1Index) ni = (ni + direction + N) % N
-        setLang2Index(ni)
+        setLang2Index((lang2Index + direction + N) % N)
       }
     },
     [lang1Index, lang2Index, isRecording],
@@ -200,7 +197,8 @@ function TranslatorApp({ config }) {
       text: "Analyzing voice input...",
     })
     setTranslationData({
-      target: `${dst.name} (Translation)`,
+      // Translation always targets English (feeds the RAG step); label reflects that, not dst's language.
+      target: "English (Translation)",
       text: "Translating...",
     })
     setMetaText("")
@@ -216,6 +214,16 @@ function TranslatorApp({ config }) {
           ...prev,
           text: "(No speech detected)",
         }))
+        return
+      }
+
+      // English source is already English — skip the Gemma round-trip, just echo it back.
+      if (src.code === "en") {
+        setTranslationData((prev) => ({ ...prev, text: transcribedText }))
+        setMetaText("")
+        if (config.enableTts) {
+          playTTS(transcribedText, dst.ttsLang)
+        }
         return
       }
 

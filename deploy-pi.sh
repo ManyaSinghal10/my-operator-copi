@@ -65,10 +65,13 @@ echo "[3/7] Installing frontend dependencies & building production UI..."
 npm --prefix "${PROJECT_DIR}/frontend" install
 npm --prefix "${PROJECT_DIR}/frontend" run build
 
-echo "[4/7] Downloading LiteRT model..."
+echo "[4/8] Downloading LiteRT model..."
 "${PROJECT_DIR}/download_model.sh"
 
-echo "[5/7] Registering systemd service..."
+echo "[5/8] Downloading STT/TTS models..."
+"${PROJECT_DIR}/download_stt_tts_models.sh"
+
+echo "[6/8] Registering systemd service..."
 SERVICE_FILE="/etc/systemd/system/gemma-translator.service"
 TEMPLATE_FILE="${PROJECT_DIR}/deploy/gemma-translator.service"
 
@@ -83,7 +86,7 @@ if [ -f "$TEMPLATE_FILE" ]; then
     sudo systemctl enable gemma-translator.service
     sudo systemctl restart gemma-translator.service
 
-    echo "[6/7] Configuring GUI kiosk autostart..."
+    echo "[7/8] Configuring GUI kiosk autostart..."
     LXSESSION_DIR="/home/${CURRENT_USER}/.config/lxsession/rpd-x"
     AUTOSTART_FILE="${LXSESSION_DIR}/autostart"
     if [ -d "$LXSESSION_DIR" ] || [ -f "/etc/xdg/lxsession/rpd-x/autostart" ]; then
@@ -98,7 +101,7 @@ if [ -f "$TEMPLATE_FILE" ]; then
         echo "[INFO] LXDE rpd-x session not detected. Skipping LXDE autostart config."
     fi
 
-    echo "[7/7] Systemd service configured and started."
+    echo "[8/8] Systemd service configured and started."
     systemctl status --no-pager gemma-translator.service || true
 else
     echo "[ERROR] Template file ${TEMPLATE_FILE} not found."
