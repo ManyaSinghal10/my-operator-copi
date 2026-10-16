@@ -20,7 +20,11 @@ litert-lm-api==0.13.1
 litert-lm-builder==0.13.0
 markdown-it-py==4.2.0
 mdurl==0.1.2
-numpy==2.5.1
+numpy==1.26.4
+# onnx_asr ships no ASR backend by default; the [cpu] extra pulls in plain
+# PyPI onnxruntime. On Jetson, drop the extra (use bare `onnx_asr`) and instead
+# pip-install a JetPack-6.2-built onnxruntime-gpu wheel (NVIDIA Jetson Zoo /
+# Jetson AI Lab) so onnx_asr's `import onnxruntime` resolves to that build.
 onnx_asr
 packaging==26.2
 platformdirs==4.10.0
@@ -47,8 +51,8 @@ faster-whisper==1.1.1
 # https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html
 # and skip the `pip install torch` line below.
 #
-# onnxruntime (used by onnx_asr, below) is CPU-only by default too; for GPU/TensorRT
+# onnxruntime (used by onnx_asr, above) is CPU-only by default too; for GPU/TensorRT
 # acceleration on Jetson you need a JetPack-6.2-built `onnxruntime-gpu` wheel (NVIDIA
 # Jetson Zoo / Jetson AI Lab), not the PyPI package.
-torch
+# setup.sh strips this line out on detected Jetson hosts; see setup.sh for the check.
 transformers
