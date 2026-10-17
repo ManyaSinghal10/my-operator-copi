@@ -46,6 +46,7 @@ const AVAILABLE_LANGUAGES = [
 function TranslatorApp({ config }) {
   // UI State
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
+  const [messages, setMessages] = useState([])
   const [activePerson, setActivePerson] = useState(1)
 
   // Translation State
@@ -58,6 +59,7 @@ function TranslatorApp({ config }) {
     text: "— waiting —",
   })
   const [metaText, setMetaText] = useState("")
+  const messageIdRef = useRef(0)
 
   // Currently-playing TTS audio element (chunked playback chain)
   const onlineAudioPlayerRef = useRef(null)
@@ -116,10 +118,8 @@ function TranslatorApp({ config }) {
         }
         player.onerror = () => {
           stopSpeaking()
-          alert("TTS playback failed. Backend server may be offline.")
         }
         player.play().catch((e) => {
-          console.error("Audio play error:", e)
           stopSpeaking()
         })
       }
@@ -129,7 +129,17 @@ function TranslatorApp({ config }) {
     [stopSpeaking],
   )
 
-  // Rotate a lane's language independently; lanes may show the same language.
+  // Rotate a lane's language, skipping the slot held by the other lane
+  // (the two lanes may never show the same language).
+  const handleSourceLanguageChange = useCallback(
+    (index) => {
+      if (isRecording) return
+      playBlip("language")
+      setLang1Index(Number(index))
+    },
+    [isRecording],
+  )
+
   const handleRotateLanguage = useCallback(
     (lane, direction) => {
       if (isRecording) return
@@ -192,6 +202,27 @@ function TranslatorApp({ config }) {
         ? AVAILABLE_LANGUAGES[lang2Index]
         : AVAILABLE_LANGUAGES[lang1Index]
 
+    const messageId = ++messageIdRef.current
+    const updateMessage = (updates) => {
+      setMessages((previousMessages) =>
+        previousMessages.map((message) =>
+          message.id === messageId ? { ...message, ...updates } : message,
+        ),
+      )
+    }
+
+    setMessages((previousMessages) => [
+      ...previousMessages,
+      {
+        id: messageId,
+        source: `${src.name} (Source)`,
+        text: "Listening...",
+        target: `${dst.name} (Translation)`,
+        translation: "Translating...",
+        meta: "",
+      },
+    ])
+
     setTranscriptionData({
       source: `${src.name} (Source)`,
       text: "Analyzing voice input...",
@@ -208,12 +239,24 @@ function TranslatorApp({ config }) {
       setTranscriptionData((prev) => ({ ...prev, text: "Listening..." }))
       const transcribedText = await transcribeAudio(base64Data, src.code)
       setTranscriptionData((prev) => ({ ...prev, text: transcribedText }))
+      updateMessage({ text: transcribedText })
 
       if (!transcribedText.trim()) {
         setTranslationData((prev) => ({
           ...prev,
           text: "(No speech detected)",
         }))
+        updateMessage({ translation: "(No speech detected)" })
+        return
+      }
+
+      // English source is already English — skip the Gemma round-trip, just echo it back.
+      if (src.code === "en") {
+        setTranslationData((prev) => ({ ...prev, text: transcribedText }))
+        setMetaText("")
+        if (config.enableTts) {
+          playTTS(transcribedText, dst.ttsLang)
+        }
         return
       }
 
@@ -236,6 +279,10 @@ function TranslatorApp({ config }) {
 
       setTranslationData((prev) => ({ ...prev, text: result.translation }))
       setMetaText(`Duration: ${result.duration}s`)
+      updateMessage({
+        translation: result.translation,
+        meta: `Duration: ${result.duration}s`,
+      })
 
       if (config.enableTts) {
         playTTS(result.translation, dst.ttsLang)
@@ -247,96 +294,16 @@ function TranslatorApp({ config }) {
         text: prev.text === "Listening..." ? "(Transcription failed)" : prev.text,
       }))
       setTranslationData((prev) => ({ ...prev, text: `Error: ${err.message}` }))
+      updateMessage({ translation: `Error: ${err.message}` })
     }
   }
-
-  // Push-to-talk keyboard control (two modes, see README):
-  // landscape = one "active person" driven by Space/Z/arrows;
-  // vertical   = independent per-lane keys (Z/X for record, arrows and -/+).
-  // keydown starts recording, keyup stops — e.repeat guards auto-repeat.
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return
-      const key = e.key.toLowerCase()
-
-      if (config.keyboardMode === "landscape") {
-        if (key === " " || e.key === "Spacebar") {
-          e.preventDefault()
-          if (!isRecording) {
-            playBlip("speaker")
-            setActivePerson((p) => (p === 1 ? 2 : 1))
-          }
-        } else if (key === "z") {
-          e.preventDefault()
-          if (!e.repeat && !isRecording) handleRecordStart(activePerson)
-        } else if (e.key === "ArrowLeft") {
-          e.preventDefault()
-          handleRotateLanguage(activePerson, -1)
-        } else if (e.key === "ArrowRight") {
-          e.preventDefault()
-          handleRotateLanguage(activePerson, 1)
-        }
-      } else {
-        if (key === "z") {
-          e.preventDefault()
-          if (!e.repeat && !isRecording) handleRecordStart(1)
-        } else if (key === "x") {
-          e.preventDefault()
-          if (!e.repeat && !isRecording) handleRecordStart(2)
-        } else if (e.key === "ArrowLeft") {
-          e.preventDefault()
-          handleRotateLanguage(1, -1)
-        } else if (e.key === "ArrowRight") {
-          e.preventDefault()
-          handleRotateLanguage(1, 1)
-        } else if (key === "-" || key === "_") {
-          e.preventDefault()
-          handleRotateLanguage(2, -1)
-        } else if (key === "+" || key === "=") {
-          e.preventDefault()
-          handleRotateLanguage(2, 1)
-        }
-      }
-    }
-
-    const handleKeyUp = (e) => {
-      if (["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return
-      const key = e.key.toLowerCase()
-
-      if (config.keyboardMode === "landscape") {
-        if (key === "z" && isRecording) handleRecordStop()
-      } else {
-        if (key === "z" && activeLaneRecording === 1) handleRecordStop()
-        if (key === "x" && activeLaneRecording === 2) handleRecordStop()
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown)
-    window.addEventListener("keyup", handleKeyUp)
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown)
-      window.removeEventListener("keyup", handleKeyUp)
-    }
-  }, [
-    config.keyboardMode,
-    isRecording,
-    activePerson,
-    activeLaneRecording,
-    handleRecordStart,
-    handleRecordStop,
-    handleRotateLanguage,
-  ])
 
   return (
     <div className="translator-envelope">
       <ResponseDrawer
         isActive={isDrawerOpen}
         onClose={() => setIsDrawerOpen(false)}
-        transcriptionSource={transcriptionData.source}
-        transcriptionText={transcriptionData.text}
-        translationTarget={translationData.target}
-        translationText={translationData.text}
-        metaText={metaText}
+        messages={messages}
       />
 
       <main className="translator-workspace">
@@ -350,7 +317,10 @@ function TranslatorApp({ config }) {
             isActivePerson={
               config.keyboardMode === "landscape" && activePerson === 1
             }
+            onLanguageChange={handleSourceLanguageChange}
             onRotate={(dir) => handleRotateLanguage(1, dir)}
+            onRecordStart={handleRecordStart}
+            onRecordStop={handleRecordStop}
           />
           <LanguageLane
             laneId={2}
@@ -362,6 +332,8 @@ function TranslatorApp({ config }) {
               config.keyboardMode === "landscape" && activePerson === 2
             }
             onRotate={(dir) => handleRotateLanguage(2, dir)}
+            onRecordStart={handleRecordStart}
+            onRecordStop={handleRecordStop}
           />
         </div>
 

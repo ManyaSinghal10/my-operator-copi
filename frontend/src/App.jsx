@@ -25,7 +25,7 @@ function App() {
   // Global configuration
   const [config, setConfig] = useState({
     keyboardMode: localStorage.getItem("keyboardMode") || "landscape",
-    enableTts: true,
+    enableTts: false,
     enhanceWithGemma: false, // Secondary Gemma enhancement (optional)
     visualizerBars: 16,
     themeColor: localStorage.getItem("themeColor") || "#ffa500",
@@ -39,14 +39,14 @@ function App() {
 
   useEffect(() => {
     if (config.themeColor) {
-      document.documentElement.style.setProperty('--bg-black', config.themeColor)
+      document.documentElement.style.setProperty('--accent-color', config.themeColor)
       localStorage.setItem("themeColor", config.themeColor)
     }
   }, [config.themeColor])
 
   return (
     <div className="app-container">
-      <div className="config-wrap-right" style={{ opacity: 1 }}>
+      <div className="config-wrap-right">
         <button
           className="config-toggle-btn"
           onClick={() => setIsSettingsOpen(true)}
@@ -56,7 +56,7 @@ function App() {
         </button>
       </div>
 
-      <div style={{ height: '100%' }}>
+      <div className="translator-shell">
         <TranslatorApp config={config} />
       </div>
 
