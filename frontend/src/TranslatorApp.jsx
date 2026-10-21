@@ -254,16 +254,7 @@ function TranslatorApp({ config }) {
       if (src.code === "en") {
         setTranslationData((prev) => ({ ...prev, text: transcribedText }))
         setMetaText("")
-        if (config.enableTts) {
-          playTTS(transcribedText, dst.ttsLang)
-        }
-        return
-      }
-
-      // English source is already English — skip the Gemma round-trip, just echo it back.
-      if (src.code === "en") {
-        setTranslationData((prev) => ({ ...prev, text: transcribedText }))
-        setMetaText("")
+        updateMessage({ translation: transcribedText, meta: "" })
         if (config.enableTts) {
           playTTS(transcribedText, dst.ttsLang)
         }

@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""One-time download of all IndicConformer STT and MMS-TTS models into the local
-Hugging Face cache, so the backend never needs internet access at runtime."""
+"""One-time download of all Whisper and IndicConformer STT models into the local
+Hugging Face cache, so the backend never needs internet access at runtime.
+
+The MMS-TTS voices are handled separately by export_mms_tts_onnx.py, which converts
+them to ONNX under backend/tts_onnx/ (run by download_stt_tts_models.sh)."""
 
 from server import (
     INDICCONFORMER_MODELS,
-    MMS_TTS_MODELS,
     get_indicconformer_model,
-    get_mms_tts_model,
     get_whisper_model,
 )
 
@@ -32,11 +33,7 @@ def main():
         print(f"[STT] Fetching IndicConformer model: {lang}")
         get_indicconformer_model(lang)
 
-    for lang in MMS_TTS_MODELS:
-        print(f"[TTS] Fetching MMS-TTS model: {lang}")
-        get_mms_tts_model(lang)
-
-    print("All STT/TTS models are cached locally.")
+    print("All STT models are cached locally.")
 
 
 if __name__ == "__main__":

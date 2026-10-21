@@ -1,0 +1,8 @@
+{
+ "sampling_rate": 16000,
+ "pad_token": "फ",
+ "unk_token": "<unk>",
+ "add_blank": true,
+ "normalize": true,
+ "is_uroman": false
+}

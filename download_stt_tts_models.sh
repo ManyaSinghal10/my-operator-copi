@@ -31,6 +31,15 @@ echo "This is a one-time step; the backend runs fully offline afterward."
 
 python3 backend/prefetch_models.py
 
+# Convert the MMS-TTS voices to ONNX once, unless already exported. Needs torch,
+# transformers and onnx (export-time only); the server itself runs on onnxruntime.
+if [ -f "backend/tts_onnx/hi/model.onnx" ] && [ -f "backend/tts_onnx/kn/model.onnx" ]; then
+    echo "TTS ONNX models already exported; skipping."
+else
+    echo "Exporting MMS-TTS voices to ONNX..."
+    python3 backend/export_mms_tts_onnx.py
+fi
+
 echo "========================================="
 echo "STT/TTS model download complete!"
 echo "You can now start the server with ./start.sh"

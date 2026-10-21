@@ -89,7 +89,7 @@ This automated script installs Debian audio/venv packages, sets up the Python en
 - `stl/` - STL files for 3D printing the hardware case.
 - `setup.sh` - Automates Python virtual environment creation and dependency installation.
 - `download_model.sh` - Fetches the required LiteRT model.
-- `download_stt_tts_models.sh` - Pre-fetches the IndicConformer STT and MMS-TTS models for offline use.
+- `download_stt_tts_models.sh` - Pre-fetches the Whisper and IndicConformer STT models for offline use and exports the MMS-TTS voices to ONNX (`backend/tts_onnx/`), so the server runs TTS on `onnxruntime` without PyTorch.
 - `start.sh` - Multi-process launcher supporting `--prod` and development modes.
 - `deploy-pi.sh` - One-command Raspberry Pi automated deployment script.
 

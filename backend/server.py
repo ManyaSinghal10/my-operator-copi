@@ -116,11 +116,16 @@ def get_whisper_model():
         if _whisper_model is None:
             from faster_whisper import WhisperModel
 
-            # Check torch's CUDA detection first: CTranslate2's own CUDA init can hang
+            # Ask CTranslate2 (already a faster-whisper dependency) whether a CUDA
+            # device is visible before attempting a CUDA load; a blind attempt can hang
             # or crash the process (not a catchable exception) on a machine without a
-            # working driver/cuDNN, so don't attempt it blindly.
-            import torch
-            if torch.cuda.is_available():
+            # working driver/cuDNN.
+            import ctranslate2
+            try:
+                cuda_available = ctranslate2.get_cuda_device_count() > 0
+            except Exception:
+                cuda_available = False
+            if cuda_available:
                 print(f"[Whisper] Loading model={WHISPER_MODEL_SIZE} device=cuda compute_type=float16...")
                 try:
                     _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
@@ -152,22 +157,16 @@ def transcribe_audio(audio_np, language):
     return transcribe_with_indicconformer(audio_np, language)
 
 
-# MMS-TTS (VITS) — fully local, one checkpoint per language.
-MMS_TTS_MODELS = {
-    "en": "facebook/mms-tts-eng",
-    "hi": "facebook/mms-tts-hin",
-    "mr": "facebook/mms-tts-mar",
-    "kn": "facebook/mms-tts-kan",
-    "ta": "facebook/mms-tts-tam",
-    "te": "facebook/mms-tts-tel",
-    "bn": "facebook/mms-tts-ben",
-    "gu": "facebook/mms-tts-guj",
-}
-_mms_tts_models = OrderedDict()  # our-lang-code -> (VitsModel, tokenizer, device)
+# MMS-TTS (VITS) — fully local, run through ONNX Runtime (no PyTorch at runtime).
+# One exported graph per language lives in backend/tts_onnx/<lang>/ and is produced
+# once by backend/export_mms_tts_onnx.py (see download_stt_tts_models.sh).
+TTS_ONNX_DIR = os.path.join(BASE_DIR, "tts_onnx")
+MMS_TTS_LANGUAGES = ("en", "hi", "mr", "kn", "ta", "te", "bn", "gu")
+_mms_tts_models = OrderedDict()  # our-lang-code -> (InferenceSession, vocab, config)
 _mms_tts_lock = threading.RLock()
 
 def get_mms_tts_model(language):
-    if language not in MMS_TTS_MODELS:
+    if language not in MMS_TTS_LANGUAGES:
         raise ValueError(f"MMS-TTS model not configured for language: {language}")
 
     with _mms_tts_lock:
@@ -175,41 +174,65 @@ def get_mms_tts_model(language):
             _mms_tts_models.move_to_end(language)
             return _mms_tts_models[language]
 
-        import torch
-        from transformers import VitsModel, AutoTokenizer
+        import onnxruntime as ort
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model_id = MMS_TTS_MODELS[language]
-        print(f"[TTS] Loading MMS-TTS model: {model_id} (device={device})")
+        model_dir = os.path.join(TTS_ONNX_DIR, language)
+        onnx_path = os.path.join(model_dir, "model.onnx")
+        if not os.path.exists(onnx_path):
+            raise FileNotFoundError(
+                f"TTS model for '{language}' not found at {onnx_path}. "
+                "Run ./download_stt_tts_models.sh (or backend/export_mms_tts_onnx.py)."
+            )
+
+        print(f"[TTS] Loading MMS-TTS ONNX model: {language}")
         if len(_mms_tts_models) >= MAX_MODELS:
             oldest_lang, _ = _mms_tts_models.popitem(last=False)
             print(f"[TTS] Evicting model for {oldest_lang}")
-        model = VitsModel.from_pretrained(model_id).to(device)
-        model.eval()
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-        _mms_tts_models[language] = (model, tokenizer, device)
-        print(f"[TTS] Model loaded: {language}")
+
+        with open(os.path.join(model_dir, "vocab.json"), encoding="utf-8") as f:
+            vocab = json.load(f)
+        with open(os.path.join(model_dir, "config.json"), encoding="utf-8") as f:
+            config = json.load(f)
+        session = ort.InferenceSession(onnx_path, providers=ONNX_PROVIDERS)
+        _mms_tts_models[language] = (session, vocab, config)
+        print(f"[TTS] Model loaded: {language} (providers={session.get_providers()})")
         return _mms_tts_models[language]
 
+def tokenize_for_mms_tts(text, vocab, config):
+    """Pure-Python port of transformers' VitsTokenizer (phonemize=False models)."""
+    if config.get("normalize", True):
+        # Lowercase anything not already a vocab symbol, then drop out-of-vocab chars.
+        text = "".join(c if c in vocab else c.lower() for c in text)
+        text = "".join(c for c in text if c in vocab).strip()
+    ids = [vocab[c] for c in text]
+    if config.get("add_blank", True):
+        pad_id = config.get("pad_id", 0)
+        interspersed = [pad_id] * (len(ids) * 2 + 1)
+        interspersed[1::2] = ids
+        ids = interspersed
+    return ids
+
 def synthesize_with_mms_tts(text, language):
-    import torch
+    session, vocab, config = get_mms_tts_model(language)
+    sampling_rate = int(config["sampling_rate"])
 
-    model, tokenizer, device = get_mms_tts_model(language)
-
-    with _mms_tts_lock:
-        inputs = tokenizer(text, return_tensors="pt").to(device)
-        with torch.no_grad():
-            waveform = model(**inputs).waveform
-
-    samples = waveform.squeeze().cpu().numpy().astype(np.float32)
-    samples = np.clip(samples, -1.0, 1.0)
+    ids = tokenize_for_mms_tts(text, vocab, config)
+    if not any(ids):
+        # Nothing speakable (e.g. punctuation only): return a short silent clip.
+        samples = np.zeros(int(sampling_rate * 0.1), dtype=np.float32)
+    else:
+        input_ids = np.asarray([ids], dtype=np.int64)
+        with _mms_tts_lock:
+            waveform = session.run(None, {"input_ids": input_ids})[0]
+        samples = np.nan_to_num(waveform.reshape(-1).astype(np.float32))
+        samples = np.clip(samples, -1.0, 1.0)
     pcm16 = (samples * 32767.0).astype('<i2')
 
     with io.BytesIO() as buf:
         with wave.open(buf, 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
-            wf.setframerate(int(model.config.sampling_rate))
+            wf.setframerate(sampling_rate)
             wf.writeframes(pcm16.tobytes())
         return buf.getvalue()
 
@@ -440,7 +463,8 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 text = ""
                 print(f"[STT] Silence detected (RMS={rms:.6f}); skipping inference")
             else:
-                text = transcribe_with_indicconformer(audio_np, language)
+                # English uses Whisper; Indian languages use IndicConformer
+                text = transcribe_audio(audio_np, language)
             print(f"[STT] Transcribed ({language}): {text}")
 
             # ==========================================

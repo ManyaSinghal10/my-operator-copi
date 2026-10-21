@@ -30,3 +30,6 @@ model/
 
 # Hugging Face cache
 .cache/
+
+# Exported MMS-TTS ONNX voices (regenerate with backend/export_mms_tts_onnx.py)
+backend/tts_onnx/

@@ -45,14 +45,9 @@ typing_extensions==4.15.0
 urllib3==2.7.0
 wcwidth==0.8.1
 faster-whisper==1.1.1
-# torch: on Jetson Orin Nano (JetPack 6.2.1, Ubuntu 22.04, Python 3.10), do NOT install
-# this plain PyPI entry. Per NVIDIA's compatibility matrix, JetPack 6.2.x pairs with
-# PyTorch 2.8.0 — follow the official install steps (they change per release) at
-# https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html
-# and skip the `pip install torch` line below.
-#
-# onnxruntime (used by onnx_asr, above) is CPU-only by default too; for GPU/TensorRT
-# acceleration on Jetson you need a JetPack-6.2-built `onnxruntime-gpu` wheel (NVIDIA
-# Jetson Zoo / Jetson AI Lab), not the PyPI package.
-# setup.sh strips this line out on detected Jetson hosts; see setup.sh for the check.
-transformers
+onnxruntime
+# Optional (only needed if re-running backend/export_mms_tts_onnx.py from scratch):
+# torch
+# transformers
+# onnx
+# onnxscript
