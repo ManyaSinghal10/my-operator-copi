@@ -1,0 +1,65 @@
+{
+  "products": [
+    {
+      "product_id": "harrier_7inch_infotainment",
+      "display_name": "Harrier 7-inch ConnectNext infotainment system",
+      "aliases": [
+        "harrier 7 inch",
+        "7 inch infotainment",
+        "connectnext",
+        "harrier connectnext"
+      ],
+      "source_files": [
+        "harrier-7-inch-infotainment-manual.json"
+      ]
+    },
+    {
+      "product_id": "harrier_mce_infotainment",
+      "display_name": "Harrier MCE infotainment system",
+      "aliases": [
+        "harrier mce",
+        "mce infotainment",
+        "harrier mce infotainment"
+      ],
+      "source_files": [
+        "harrier-mce-infotainment-system-user-manual-feb-2024.json"
+      ]
+    },
+    {
+      "product_id": "harrier_bs6",
+      "display_name": "Harrier BS6 vehicle",
+      "aliases": [
+        "harrier bs6",
+        "bs6 harrier",
+        "harrier owners manual"
+      ],
+      "source_files": [
+        "harrier-bs6-owners-manual-april-2026.json"
+      ]
+    },
+    {
+      "product_id": "safari-storme",
+      "display_name": "Safari Storme vehicle",
+      "aliases": [
+        "safari storme",
+        "storme owners manual",
+        "safari storme owners manual"
+      ],
+      "source_files": [
+        "safari-storme-owners-manual-2019.json"
+      ]
+    },
+    {
+      "product_id": "safari-2-2vtt-dicor",
+      "display_name": "Safari 2.2 VTT Dicor vehicle",
+      "aliases": [
+        "safari 2.2 vtt dicor",
+        "2.2 vtt dicor",
+        "safari dicor owners manual"
+      ],
+      "source_files": [
+        "safari-2-2vtt-dicor.json"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+# ==========================================
+# Python & Virtual Environments
+# ==========================================
+venv/
+**/venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# ==========================================
+# Node / Frontend
+# ==========================================
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+.npm
+
+# ==========================================
+# ML Models & Weights
+# ==========================================
+indicconformer_test/model/
+*.onnx
+*.onnx_data
+*.litertlm
+*.pt
+*.pth
+*.bin
+*.safetensors
+.cache/
+
+# ==========================================
+# RAG / Vector DB & Generated Artifacts
+# ==========================================
+processed/chroma_db/
+processed/chroma_test/
+processed/bm25_index.pkl
+# Uncomment below to ignore all generated JSON chunks as well:
+# processed/*.json
+
+# ==========================================
+# Environment, OS & IDE
+# ==========================================
+.env
+.env.*
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.log
+
+# Local backup files
+*_old.py

@@ -1,0 +1,16 @@
+{
+  "fingerprint": "bb01150842c5c11ae4baca91c1ed0f8d9d47624c946bde8943b9bc91d19240fb",
+  "model_name": "BAAI/bge-small-en-v1.5",
+  "collection_name": "harrier_manual_chunks",
+  "chunk_count": 3004,
+  "source_documents": [
+    "harrier-7-inch-infotainment-manual.json",
+    "harrier-bs6-owners-manual-april-2026.json",
+    "harrier-mce-infotainment-system-user-manual-feb-2024.json",
+    "safari-2-2vtt-dicor.json",
+    "safari-storme-owners-manual-2019.json"
+  ],
+  "embedding_dimension": 384,
+  "distance_metric": "cosine",
+  "database_directory": "/home/manya/Documents/gemma-variant3/processed/chroma_db"
+}

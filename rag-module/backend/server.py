@@ -1,0 +1,829 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import http.server
+import socketserver
+import urllib.request
+import urllib.error
+import urllib.parse
+import os
+import base64
+import io
+import json
+import numpy as np
+import wave
+import traceback
+import socket
+import ssl
+import onnx_asr
+import threading
+from jiwer import wer, cer
+from collections import OrderedDict
+
+INDICCONFORMER_MODELS = {
+    "kn": "OpenVoiceOS/ai4bharat-indicconformer-kn-onnx",
+    "mr": "OpenVoiceOS/ai4bharat-indicconformer-mr-onnx",
+    "hi": "OpenVoiceOS/ai4bharat-indicconformer-hi-onnx",
+    "gu": "OpenVoiceOS/ai4bharat-indicconformer-gu-onnx",
+    "bn": "OpenVoiceOS/ai4bharat-indicconformer-bn-onnx",
+    "ta": "OpenVoiceOS/ai4bharat-indicconformer-ta-onnx",
+    "te": "OpenVoiceOS/ai4bharat-indicconformer-te-onnx",
+}
+
+_indicconformer_models = OrderedDict()  # our-lang-code -> ASR model (LRU, capped at MAX_MODELS)
+_indicconformer_lock = threading.RLock()
+
+STT_TEST_REFERENCES = {
+    "en": "Namaste, how are you",
+    "kn": "ನಮಸ್ಕಾರ, ನೀವು ಹೇಗಿದ್ದೀರಿ",
+    "mr": "नमस्कार, तुम्ही कसे आहात",
+    "hi": "नमस्ते, आप कैसे हैं",
+    "ta": "வணக்கம், நீங்கள் எப்படி இருக்கிறீர்கள்",
+    "te": "నమస్కారం, మీరు ఎలా ఉన్నారు",
+    "gu": "નમસ્તે, તમે કેમ છો",
+    "bn": "নমস্কার, আপনি কেমন আছেন",
+}
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Requested in priority order; onnxruntime silently falls back to the next
+# available provider, so this is safe even without a GPU build installed.
+ONNX_PROVIDERS = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+# IndicConformer ONNX STT
+# ============================================================
+
+def get_indicconformer_model(language):
+    if language not in INDICCONFORMER_MODELS:
+        raise ValueError(
+            f"IndicConformer model not configured for language: {language}"
+        )
+
+    with _indicconformer_lock:
+        if language in _indicconformer_models:
+            _indicconformer_models.move_to_end(language)
+            return _indicconformer_models[language]
+
+        model_id = INDICCONFORMER_MODELS[language]
+
+        print(f"[IndicConformer] Loading model: {model_id}")
+        if len(_indicconformer_models) >= MAX_MODELS:
+            oldest_lang, _ = _indicconformer_models.popitem(last=False)
+            print(f"[IndicConformer] Evicting model for {oldest_lang}")
+
+        _indicconformer_models[language] = onnx_asr.load_model(model_id, providers=ONNX_PROVIDERS)
+
+        print(f"[IndicConformer] Model loaded: {language}")
+
+        return _indicconformer_models[language]
+
+def transcribe_with_indicconformer(audio_np, language):
+    model = get_indicconformer_model(language)
+
+    print(f"[IndicConformer] Transcribing language: {language}")
+    print(f"[IndicConformer] Audio samples: {len(audio_np)}")
+
+    result = model.recognize(audio_np)
+
+    print(f"[IndicConformer] Result: {result}")
+
+    return result.strip()
+
+
+# Whisper STT for English only (IndicConformer has no English model).
+WHISPER_MODEL_SIZE = "small.en"
+_whisper_model = None
+_whisper_lock = threading.RLock()
+
+def get_whisper_model():
+    global _whisper_model
+    with _whisper_lock:
+        if _whisper_model is None:
+            from faster_whisper import WhisperModel
+
+            # Check torch's CUDA detection first: CTranslate2's own CUDA init can hang
+            # or crash the process (not a catchable exception) on a machine without a
+            # working driver/cuDNN, so don't attempt it blindly.
+            import torch
+            if torch.cuda.is_available():
+                print(f"[Whisper] Loading model={WHISPER_MODEL_SIZE} device=cuda compute_type=float16...")
+                try:
+                    _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cuda", compute_type="float16")
+                except Exception as e:
+                    print(f"[Whisper] CUDA load failed ({e}), falling back to CPU")
+                    _whisper_model = None
+
+            if _whisper_model is None:
+                print(f"[Whisper] Loading model={WHISPER_MODEL_SIZE} device=cpu compute_type=int8...")
+                _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+        return _whisper_model
+
+def transcribe_with_whisper(audio_np, language):
+    model = get_whisper_model()
+
+    print(f"[Whisper] Transcribing language: {language}")
+    print(f"[Whisper] Audio samples: {len(audio_np)}")
+
+    segments, _ = model.transcribe(audio_np, language="en")
+    result = "".join(segment.text for segment in segments).strip()
+
+    print(f"[Whisper] Result: {result}")
+
+    return result
+
+def transcribe_audio(audio_np, language):
+    if language == "en":
+        return transcribe_with_whisper(audio_np, language)
+    return transcribe_with_indicconformer(audio_np, language)
+
+
+# MMS-TTS (VITS) — fully local, one checkpoint per language.
+MMS_TTS_MODELS = {
+    "en": "facebook/mms-tts-eng",
+    "hi": "facebook/mms-tts-hin",
+    "mr": "facebook/mms-tts-mar",
+    "kn": "facebook/mms-tts-kan",
+    "ta": "facebook/mms-tts-tam",
+    "te": "facebook/mms-tts-tel",
+    "bn": "facebook/mms-tts-ben",
+    "gu": "facebook/mms-tts-guj",
+}
+_mms_tts_models = OrderedDict()  # our-lang-code -> (VitsModel, tokenizer, device)
+_mms_tts_lock = threading.RLock()
+
+def get_mms_tts_model(language):
+    if language not in MMS_TTS_MODELS:
+        raise ValueError(f"MMS-TTS model not configured for language: {language}")
+
+    with _mms_tts_lock:
+        if language in _mms_tts_models:
+            _mms_tts_models.move_to_end(language)
+            return _mms_tts_models[language]
+
+        import torch
+        from transformers import VitsModel, AutoTokenizer
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model_id = MMS_TTS_MODELS[language]
+        print(f"[TTS] Loading MMS-TTS model: {model_id} (device={device})")
+        if len(_mms_tts_models) >= MAX_MODELS:
+            oldest_lang, _ = _mms_tts_models.popitem(last=False)
+            print(f"[TTS] Evicting model for {oldest_lang}")
+        model = VitsModel.from_pretrained(model_id).to(device)
+        model.eval()
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        _mms_tts_models[language] = (model, tokenizer, device)
+        print(f"[TTS] Model loaded: {language}")
+        return _mms_tts_models[language]
+
+def synthesize_with_mms_tts(text, language):
+    import torch
+
+    model, tokenizer, device = get_mms_tts_model(language)
+
+    with _mms_tts_lock:
+        inputs = tokenizer(text, return_tensors="pt").to(device)
+        with torch.no_grad():
+            waveform = model(**inputs).waveform
+
+    samples = waveform.squeeze().cpu().numpy().astype(np.float32)
+    samples = np.clip(samples, -1.0, 1.0)
+    pcm16 = (samples * 32767.0).astype('<i2')
+
+    with io.BytesIO() as buf:
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(int(model.config.sampling_rate))
+            wf.writeframes(pcm16.tobytes())
+        return buf.getvalue()
+
+def translate_with_gemma(text, src_lang, tgt_lang):
+    """Translate text using the local Gemma model via LiteRT-LM."""
+
+    language_names = {
+        "en": "English",
+        "hi": "Hindi",
+        "mr": "Marathi",
+        "kn": "Kannada",
+        "ta": "Tamil",
+        "te": "Telugu",
+        "bn": "Bengali",
+        "gu": "Gujarati",
+        "ml": "Malayalam",
+        "pa": "Punjabi",
+        "or": "Odia",
+    }
+
+    src_name = language_names.get(src_lang, src_lang)
+    tgt_name = language_names.get(tgt_lang, tgt_lang)
+
+    prompt = f"""
+You are a professional translator.
+
+Translate the following text from {src_name} to {tgt_name}.
+
+Rules:
+- Preserve the exact meaning.
+- Do not add information.
+- Do not explain the translation.
+- Do not summarize.
+- Return ONLY the translated text.
+- Preserve names, numbers, dates, and places accurately.
+
+Source text:
+{text}
+""".strip()
+
+    print("\n========== GEMMA TRANSLATION ==========")
+    print(f"Source language : {src_name} ({src_lang})")
+    print(f"Target language : {tgt_name} ({tgt_lang})")
+    print(f"Input text      : {text}")
+
+    payload = {
+        "model": "gemma4-e2b",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "max_tokens": 512,
+        "temperature": 0.1,
+    }
+
+    request = urllib.request.Request(
+        "http://localhost:9379/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=300) as response:
+        result = json.loads(response.read().decode("utf-8"))
+
+    translation = (
+        result["choices"][0]["message"]["content"]
+        .strip()
+    )
+
+    print(f"Gemma output    : {translation}")
+    print("=======================================\n")
+
+    return translation
+
+PORT = 3000
+
+MAX_MODELS = 2
+
+class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+    def end_headers(self):
+        # Add CORS headers
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE')
+        self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, x-target-url, authorization')
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def handle_proxy(self):
+        # Parse query parameter "url"
+        parsed_path = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed_path.query)
+        target_url = query.get('url', [None])[0]
+
+        if not target_url:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b'Error: Missing "url" query parameter.')
+            return
+
+        # Restrict target URL to local LLM endpoint (http/https localhost/127.0.0.1)
+        parsed_target = urllib.parse.urlparse(target_url)
+        if parsed_target.scheme not in ('http', 'https') or parsed_target.hostname not in ('localhost', '127.0.0.1') or parsed_target.port not in (9379, None):
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b'Forbidden: Proxy target must be localhost:9379')
+            return
+
+        print(f"[Proxy] Routing {self.command} request to: {target_url}")
+        
+        # Read request body if method is POST/PUT/PATCH
+        body = None
+        if self.command in ['POST', 'PUT', 'PATCH']:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+
+        # Build request to target url
+        req = urllib.request.Request(
+            target_url,
+            data=body,
+            method=self.command
+        )
+
+        # Forward headers (Content-Type, Authorization, etc.)
+        for key, val in self.headers.items():
+            if key.lower() not in ['host', 'connection', 'content-length', 'x-target-url']:
+                req.add_header(key, val)
+
+        try:
+            with urllib.request.urlopen(req, timeout=300) as response:
+                res_body = response.read()
+                self.send_response(response.status)
+                # Forward response headers
+                for key, val in response.headers.items():
+                    if key.lower() not in ['content-length', 'connection']:
+                        self.send_header(key, val)
+                self.end_headers()
+                self.wfile.write(res_body)
+        except urllib.error.HTTPError as e:
+            print(f"[Proxy Error] HTTP Error {e.code}: {e.reason}")
+            try:
+                res_body = e.read()
+            except Exception:
+                res_body = str(e).encode('utf-8')
+            self.send_response(e.code)
+            self.end_headers()
+            self.wfile.write(res_body)
+        except Exception as e:
+            print(f"[Proxy Error] Exception: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode('utf-8'))
+
+    def handle_tts(self):
+        parsed_path = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed_path.query)
+        text = query.get('text', [None])[0]
+        lang = query.get('lang', ['en'])[0]
+
+        if not text:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b'Error: Missing "text" parameter.')
+            return
+
+        print(f"[TTS] Synthesizing with MMS-TTS: {text[:50]}... (lang: {lang})")
+
+        try:
+            wav_bytes = synthesize_with_mms_tts(text, lang)
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/wav')
+            self.send_header('Content-Length', str(len(wav_bytes)))
+            self.end_headers()
+            self.wfile.write(wav_bytes)
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[TTS Error] Exception: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode('utf-8'))
+
+
+    def handle_stt(self):
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            
+            if not body:
+                raise ValueError("No body data")
+                
+            data = json.loads(body.decode('utf-8'))
+            audio_b64 = data.get('audio_base64')
+            if not audio_b64:
+                raise ValueError("Missing audio_base64 parameter")
+
+            language = data.get("language", "en")
+            raw_data = base64.b64decode(audio_b64)
+            audio_np = np.frombuffer(raw_data, dtype=np.float32)
+
+            # Normalize microphone audio for IndicConformer
+            audio_np = audio_np.astype(np.float32)
+
+            peak = np.max(np.abs(audio_np))
+
+            if peak > 0:
+                audio_np = audio_np / peak
+
+            # Prevent clipping
+            audio_np = np.clip(audio_np, -1.0, 1.0)
+
+            print("\n========== AUDIO DEBUG ==========")
+            print            (f"Raw bytes       : {len(raw_data)}")
+            print(f"Samples         : {len(audio_np)}")
+            print(f"Duration        : {len(audio_np) / 16000:.2f} sec")
+            print(f"Dtype           : {audio_np.dtype}")
+            print(f"Min             : {audio_np.min():.4f}")
+            print(f"Max             : {audio_np.max():.4f}")
+            print(f"Mean            : {audio_np.mean():.4f}")
+            print(f"RMS             : {np.sqrt(np.mean(audio_np ** 2)):.4f}")
+            print(f"First 10 values : {audio_np[:10]}")
+            print("================================")
+
+            # English uses Whisper; Indian languages use IndicConformer
+            text = transcribe_audio(audio_np, language)
+            print(f"[STT] Transcribed ({language}): {text}")
+
+            # ==========================================
+            # STT ACCURACY TEST
+            # ==========================================
+
+            reference = STT_TEST_REFERENCES.get(language)
+
+            if reference:
+                word_error_rate = wer(reference, text)
+                character_error_rate = cer(reference, text)
+
+                word_accuracy = max(
+                    0,
+                    (1 - word_error_rate) * 100
+                )
+
+                character_accuracy = max(
+                    0,
+                    (1 - character_error_rate) * 100
+                )
+
+                print()
+                print("========== STT ACCURACY ==========")
+                print(f"Language            : {language}")
+                print(f"Reference           : {reference}")
+                print(f"Prediction          : {text}")
+                print()
+                print(f"WER                 : {word_error_rate * 100:.2f}%")
+                print(f"CER                 : {character_error_rate * 100:.2f}%")
+                print(f"Word Accuracy       : {word_accuracy:.2f}%")
+                print(f"Character Accuracy : {character_accuracy:.2f}%")
+                print("==================================")
+                print()
+            else:
+                print(
+                    f"[STT Accuracy] No reference sentence configured for: {language}"
+                )
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"text": text}).encode('utf-8'))
+
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[STT Error] Exception: {e}")
+            self.send_response(500)
+            self.end_headers()
+
+            self.wfile.write(
+            json.dumps({"error": str(e)}).encode('utf-8')
+        )
+
+    def handle_translate(self):
+        """Translate text using the local Gemma model."""
+        try:
+            content_length = int(
+                self.headers.get("Content-Length", 0)
+            )
+
+            body = self.rfile.read(content_length)
+
+            if not body:
+                raise ValueError("No body data")
+
+            data = json.loads(
+                body.decode("utf-8")
+            )
+
+            text = data.get("text")
+            src_lang = data.get(
+                "source_language",
+                "en"
+            )
+            tgt_lang = data.get(
+                "target_language",
+                "en"
+            )
+
+            if not text:
+                raise ValueError(
+                    "Missing text parameter"
+                )
+
+            print(
+                f"[MT] Translating "
+                f"{src_lang} → {tgt_lang} "
+                f"using Gemma..."
+            )
+
+            translation = translate_with_gemma(
+                text,
+                src_lang,
+                tgt_lang,
+            )
+
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "application/json"
+            )
+            self.end_headers()
+
+            self.wfile.write(
+                json.dumps({
+                    "translation": translation,
+                    "source_language": src_lang,
+                    "target_language": tgt_lang,
+                }).encode("utf-8")
+            )
+
+        except Exception as e:
+            traceback.print_exc()
+
+            print(
+                f"[MT Error] Exception: {e}"
+            )
+
+            self.send_response(500)
+            self.end_headers()
+
+            self.wfile.write(
+                str(e).encode("utf-8")
+            )
+
+    def handle_volume(self):
+        client_ip = self.client_address[0]
+        if client_ip not in ('127.0.0.1', '::1', 'localhost'):
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b'Forbidden: Volume control is only accessible locally')
+            return
+
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 0:
+                body = self.rfile.read(content_length)
+                data = json.loads(body.decode('utf-8')) if body else {}
+                action = data.get('action')
+            else:
+                action = "get"
+            
+            import subprocess
+            import re
+            
+            # PipeWire/wpctl needs XDG_RUNTIME_DIR to find its socket.
+            # The server process may not have it set (e.g. when launched by systemd).
+            env = os.environ.copy()
+            if 'XDG_RUNTIME_DIR' not in env:
+                uid = os.getuid()
+                env['XDG_RUNTIME_DIR'] = f'/run/user/{uid}'
+            
+            def get_vol():
+                # Try wpctl (PipeWire) first - outputs "Volume: 0.75"
+                try:
+                    out = subprocess.check_output(
+                        ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
+                        text=True, timeout=2, env=env
+                    )
+                    m = re.search(r'Volume:\s+([0-9.]+)', out)
+                    if m:
+                        return round(float(m.group(1)) * 100)
+                except Exception:
+                    pass
+                # Try pactl (PulseAudio)
+                try:
+                    out = subprocess.check_output(
+                        ["pactl", "get-sink-volume", "@DEFAULT_SINK@"],
+                        text=True, timeout=2, env=env
+                    )
+                    m = re.search(r'(\d+)%', out)
+                    if m:
+                        return int(m.group(1))
+                except Exception:
+                    pass
+                # Try amixer
+                try:
+                    out = subprocess.check_output(
+                        ["amixer", "sget", "Master"],
+                        text=True, timeout=2, env=env
+                    )
+                    m = re.search(r'\[(\d+)%\]', out)
+                    if m:
+                        return int(m.group(1))
+                except Exception:
+                    pass
+                return None
+
+            def set_vol(direction):
+                # Try wpctl first
+                try:
+                    arg = "5%+" if direction == "up" else "5%-"
+                    subprocess.run(
+                        ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", arg],
+                        check=True, timeout=2, env=env,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    return True
+                except Exception:
+                    pass
+                # Try pactl
+                try:
+                    arg = "+5%" if direction == "up" else "-5%"
+                    subprocess.run(
+                        ["pactl", "set-sink-volume", "@DEFAULT_SINK@", arg],
+                        check=True, timeout=2, env=env,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    return True
+                except Exception:
+                    pass
+                # Try amixer
+                try:
+                    arg = "5%+" if direction == "up" else "5%-"
+                    subprocess.run(
+                        ["amixer", "sset", "Master", arg],
+                        check=True, timeout=2, env=env,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    return True
+                except Exception:
+                    pass
+                return False
+
+            success = False
+            if action in ("up", "down"):
+                success = set_vol(action)
+            elif action == "get":
+                success = True
+
+            if success:
+                current_vol = get_vol()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok", "volume": current_vol}).encode('utf-8'))
+            else:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b'Failed to change system volume')
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode('utf-8'))
+
+    def do_POST(self):
+        if self.path.startswith('/proxy'):
+            self.handle_proxy()
+            return
+
+        if self.path.startswith('/api/stt'):
+            self.handle_stt()
+            return
+
+        elif self.path.startswith('/api/translate'):
+            self.handle_translate()
+            return
+            
+        elif self.path.startswith('/api/volume'):
+            self.handle_volume()
+            return
+        
+        self.send_response(404)
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path.startswith('/proxy'):
+            self.handle_proxy()
+            return
+
+        if self.path.startswith('/api/tts'):
+            self.handle_tts()
+            return
+            
+        if self.path.startswith('/api/volume'):
+            self.handle_volume()
+            return
+
+        # Clean path to serve static files (strip any ?query cache-buster)
+        url_path = self.path.split('?', 1)[0]
+        if url_path == '/':
+            url_path = '/index.html'
+
+        dist_dir = os.path.realpath(os.path.join(BASE_DIR, '..', 'frontend', 'dist'))
+        if not os.path.exists(dist_dir):
+            dist_dir = os.path.realpath(os.path.join(BASE_DIR, 'dist'))
+        if not os.path.exists(dist_dir):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'dist/ directory not found')
+            return
+
+        filename = url_path.lstrip('/')
+        filepath = os.path.realpath(os.path.join(dist_dir, filename))
+        
+        # Check if the file is within dist directory
+        if not filepath.startswith(dist_dir + os.sep) and filepath != dist_dir:
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b'Forbidden')
+            return
+
+        if not os.path.exists(filepath) or os.path.isdir(filepath):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'File not found')
+            return
+
+        # Determine MIME type
+        ext = os.path.splitext(filepath)[1].lower()
+        mime_types = {
+            '.html': 'text/html',
+            '.css': 'text/css',
+            '.js': 'application/javascript',
+            '.json': 'application/json',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.svg': 'image/svg+xml',
+            '.ico': 'image/x-icon',
+        }
+        content_type = mime_types.get(ext, 'application/octet-stream')
+
+        # Read and serve file
+        try:
+            with open(filepath, 'rb') as f:
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.end_headers()
+                self.wfile.write(f.read())
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode('utf-8'))
+
+if __name__ == '__main__':
+    # Once models are cached (see download_stt_tts_models.sh), skip Hugging Face
+    # Hub's "check for updates" network call — it can hang/block a request thread
+    # for a long time with no internet. prefetch_models.py runs separately and
+    # doesn't hit this guard, so real downloads there are unaffected.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+    # Allow port reuse
+    socketserver.TCPServer.allow_reuse_address = True
+    local_ip = "localhost"
+    try:
+        # Create a dummy socket to find local network IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+
+    use_ssl = os.path.exists('cert.pem') and os.path.exists('key.pem')
+
+    with socketserver.ThreadingTCPServer(("", PORT), ProxyHTTPRequestHandler) as httpd:
+        if use_ssl:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile='cert.pem', keyfile='key.pem')
+            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+
+        protocol = "https" if use_ssl else "http"
+        print(f"===========================================================")
+        print(f"LiteRT-LM Audio Testbed client running at:")
+        print(f"👉 {protocol}://localhost:{PORT}")
+        if local_ip != "localhost":
+            print(f"👉 {protocol}://{local_ip}:{PORT} (Local Network)")
+        print(f"===========================================================")
+        
+        def _prewarm_models():
+            try:
+                print("[Prewarm] Loading IndicConformer Kannada model...", flush=True)
+
+                get_indicconformer_model("kn")
+
+                print("[Prewarm] IndicConformer ready.", flush=True)
+
+            except Exception as e:
+                print(f"[Prewarm Error] {e}", flush=True)
+
+
+        threading.Thread(target=_prewarm_models, daemon=True).start()
+
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down server.")
